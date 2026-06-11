@@ -8,9 +8,10 @@ WORKDIR /app
 RUN pip install --no-cache-dir uv
 
 COPY pyproject.toml uv.lock* ./
-RUN uv sync --frozen --no-editable --all-extras || uv sync --no-editable --all-extras
+RUN uv sync --frozen --no-install-project
 
 COPY . .
+RUN uv sync --frozen --no-editable
 
 EXPOSE 8000
 
