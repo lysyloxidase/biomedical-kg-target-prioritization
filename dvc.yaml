@@ -1,0 +1,16 @@
+stages:
+  data:
+    cmd: python -m kgtp.cli data
+    deps:
+      - configs/sources.yaml
+      - src/kgtp/data
+    outs:
+      - data/interim
+      - data/crosswalk
+  graph:
+    cmd: python -m kgtp.cli graph
+    deps:
+      - data/interim
+      - src/kgtp/data/build_graph.py
+    outs:
+      - data/processed

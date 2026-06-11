@@ -1,0 +1,19 @@
+name: docs
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - name: Sync docs environment
+        run: uv sync --frozen --extra dev --no-editable
+      - name: Deploy MkDocs to gh-pages
+        run: uv run --no-editable mkdocs gh-deploy --force

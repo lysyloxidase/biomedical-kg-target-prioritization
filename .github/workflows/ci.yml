@@ -1,0 +1,39 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  lint-type-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - name: Sync locked environment
+        run: uv sync --frozen --extra dev --no-editable
+      - name: Lint and format
+        run: uv run --no-editable ruff check . && uv run --no-editable ruff format --check .
+      - name: Typecheck
+        run: |
+          uv run --no-editable mypy src
+          uv run --no-editable pyright src tests
+      - name: Tests
+        run: uv run --no-editable pytest --cov=kgtp --cov-report=term-missing --cov-fail-under=85
+      - name: Split-leakage tests
+        run: uv run --no-editable pytest tests/unit/test_splits.py -v
+
+  smoke-train:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - name: Sync locked environment
+        run: uv sync --frozen --extra dev --no-editable
+      - name: Smoke-train HGT on a tiny synthetic subgraph
+        run: uv run --no-editable python -m kgtp.cli smoke-train --tiny
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -f docker/Dockerfile -t kgtp:ci .

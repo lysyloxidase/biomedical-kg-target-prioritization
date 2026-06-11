@@ -1,0 +1,25 @@
+seed: 13
+disease:
+  efo: EFO_0004616
+  label: knee osteoarthritis
+crosswalk:
+  min_seed_gene_coverage: 0.90
+graph:
+  min_nodes: 2000
+  max_nodes: 6000
+  string_confidence_threshold: 700
+  max_seed_genes: 800
+  max_total_genes: 3500
+  max_go_terms: 1000
+  max_pathways: 800
+splits:
+  seed: 13
+  train: 0.80
+  validation: 0.10
+  test: 0.10
+evaluation:
+  negative_sampling: ogb_style
+  metrics:
+    - hits_at_10
+    - hits_at_50
+    - mrr

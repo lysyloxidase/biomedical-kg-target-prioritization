@@ -1,0 +1,38 @@
+sources:
+  open_targets:
+    version: "25.06"
+    disease_efo: "EFO_0004616"
+    access: "parquet_bulk + graphql"
+    graphql: "https://api.platform.opentargets.org/api/v4/graphql"
+    license: "CC0-1.0"
+    extract:
+      - disease_gene_associations
+      - genetic_association_datatype
+      - drug_moa
+      - tractability
+  string:
+    version: "12.0"
+    species: 9606
+    confidence_threshold: 700
+    license: "CC-BY-4.0"
+  reactome:
+    version: "v90"
+    access: "contentservice + Ensembl2Reactome bulk"
+    license: "CC-BY-4.0"
+  chembl:
+    version: "35"
+    license: "CC-BY-SA-3.0"
+    extract:
+      - mechanism
+      - drug_target
+      - pchembl
+  uniprot:
+    version: "2025_03"
+    license: "CC-BY-4.0"
+  gene_ontology:
+    version: "2025-05"
+    access: "GAF bulk (GOA human)"
+    license: "CC-BY-4.0"
+  disgenet:
+    status: "EXCLUDED"
+    reason: "Open Targets genetic_association is the CC0 substitute"

@@ -1,0 +1,29 @@
+services:
+  neo4j:
+    image: neo4j:5
+    environment:
+      NEO4J_AUTH: neo4j/password
+      NEO4J_server_memory_heap_initial__size: 1G
+      NEO4J_server_memory_heap_max__size: 2G
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - ../neo4j/data:/data
+      - ../neo4j/logs:/logs
+      - ../neo4j/import:/import
+
+  kgtp:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    depends_on:
+      - neo4j
+    ports:
+      - "8000:8000"
+    environment:
+      KGTP_NEO4J__URI: bolt://neo4j:7687
+      KGTP_NEO4J__USER: neo4j
+      KGTP_NEO4J__PASSWORD: password
+    volumes:
+      - ..:/app

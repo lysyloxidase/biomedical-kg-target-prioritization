@@ -1,0 +1,22 @@
+project:
+  name: biomedical-kg-target-prioritization
+  phase: 1
+paths:
+  raw: data/raw
+  interim: data/interim
+  processed: data/processed
+  crosswalk: data/crosswalk
+neo4j:
+  uri: bolt://localhost:7687
+  user: neo4j
+  database: neo4j
+graph:
+  disease_efo: EFO_0004616
+  min_nodes: 2000
+  max_nodes: 6000
+  canonical_edge_types:
+    - associated_with
+    - interacts
+    - participates_in
+    - targets
+    - annotated_with

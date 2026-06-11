@@ -1,0 +1,16 @@
+site_name: Biomedical KG Target Prioritization
+site_author: lysyloxidase
+copyright: Copyright &copy; 2026 lysyloxidase
+theme:
+  name: material
+nav:
+  - Home: index.md
+  - Data Sources: data-sources.md
+  - KG Schema: kg-schema.md
+  - OA Biology: oa-biology.md
+  - Caveats: caveats.md
+  - ADRs:
+      - Disease Anchor: adr/0001-disease-anchor-efo0004616.md
+      - Source Policy: adr/0002-six-sources-exclude-disgenet.md
+      - Ensembl Hub: adr/0003-ensembl-hub-crosswalk.md
+      - Evaluation: adr/0004-ogb-style-evaluation.md
