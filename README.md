@@ -1,5 +1,8 @@
 # biomedical-kg-target-prioritization
 
+[![CI](https://github.com/lysyloxidase/biomedical-kg-target-prioritization/actions/workflows/ci.yml/badge.svg)](https://github.com/lysyloxidase/biomedical-kg-target-prioritization/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 Research software for OA-centric biomedical knowledge-graph target
 prioritization. Version `0.2.0` provides an executable, redistributable sample
 pipeline. It does not provide a completed full-scale benchmark or validated
@@ -9,6 +12,11 @@ Computational hypothesis generation only. This repository does not diagnose
 disease, recommend treatment, establish causality, or provide clinical advice.
 
 ## Current Status
+
+Release maturity: **alpha**. The complete sample workflow, safety checks, and
+Docker image are exercised in CI. See the
+[`final validation report`](docs/final-validation-report.md) for command-level
+evidence and remaining release limitations.
 
 Implemented and tested:
 
@@ -58,6 +66,14 @@ make reproduce-small
 make test
 ```
 
+Without Make:
+
+```bash
+uv sync --frozen --extra dev --no-editable
+uv run kgtp reproduce-small
+uv run pytest -q
+```
+
 `make reproduce-small` performs real local work and writes the current manifest
 to `artifacts/sample/manifests/run.json` plus an immutable run-id-specific copy
 under `artifacts/sample/manifests/runs/`. The manifest records the Git state,
@@ -66,6 +82,44 @@ input hashes, graph/split/feature/checkpoint hashes, seeds, command, and status.
 
 `make reproduce` intentionally fails because the production workflow is not
 yet complete.
+
+### Pipeline Commands
+
+Each stage validates its prerequisites and writes deterministic artifacts under
+`artifacts/sample/`:
+
+| Stage | Command | Main output |
+| --- | --- | --- |
+| Validate sample | `uv run kgtp prepare-sample` | dataset manifest |
+| Normalize identifiers | `uv run kgtp normalize` | normalized Parquet tables |
+| Assemble graph | `uv run kgtp assemble` | full reference graph |
+| Split supervision | `uv run kgtp split` | train/validation/test splits |
+| Fit features | `uv run kgtp features` | train-fitted features and PyG graph |
+| Train baselines | `uv run kgtp train-baselines` | baseline models and metrics |
+| Train GNNs | `uv run kgtp train-gnn` | per-seed GNN checkpoints |
+| Evaluate | `uv run kgtp evaluate` | unified evaluation metrics |
+| Report | `uv run kgtp report` | Markdown and machine-readable reports |
+
+Use `uv run kgtp --help` or `uv run kgtp <command> --help` for the complete CLI
+reference.
+
+### Open In A Browser
+
+After `make reproduce-small` completes, start the validated-artifact API:
+
+```bash
+make api
+```
+
+Open:
+
+- dashboard: <http://127.0.0.1:8000>
+- health and artifact status: <http://127.0.0.1:8000/health>
+- interactive OpenAPI documentation: <http://127.0.0.1:8000/docs>
+
+The server fails closed with HTTP 503 when required artifacts are absent,
+untrained, corrupted, or incompatible. `KGTP_DEMO_MODE=true` is an explicit
+non-scientific demo mode and is never enabled implicitly.
 
 ## Sample Dataset
 
