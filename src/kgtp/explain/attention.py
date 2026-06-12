@@ -1,4 +1,9 @@
-"""HGT attention-weight extraction for prediction rationales."""
+"""Topology summaries used alongside model attributions.
+
+PyG's HGTConv does not expose stable per-edge attention weights. This module
+therefore names its endpoint-conditioned summary explicitly and never presents
+it as model attention.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,6 @@ from typing import Any, SupportsFloat, cast
 import torch
 from torch import nn
 from torch_geometric.data import HeteroData
-from torch_geometric.explain import AttentionExplainer
 
 from kgtp.explain.explainer import DISEASE_GENE_EDGE
 
@@ -18,7 +22,7 @@ EdgeType = tuple[str, str, str]
 
 @dataclass(frozen=True)
 class AttentionWeight:
-    """One per-layer edge attention/proxy-attention record."""
+    """One per-layer endpoint-conditioned topology record."""
 
     layer: int
     edge_type: EdgeType
@@ -45,21 +49,13 @@ def extract_hgt_attention_weights(
     edge_type: EdgeType = DISEASE_GENE_EDGE,
     top_k: int = 20,
 ) -> dict[str, object]:
-    """Extract per-layer, per-edge-type HGT attention records.
+    """Summarize edges incident to the prediction endpoints.
 
-    PyG's ``HGTConv`` does not expose a stable public attention tensor across
-    versions. When native attention is unavailable, this returns a deterministic
-    endpoint-conditioned proxy and marks the method accordingly. The schema is
-    the same either way, so downstream reports remain reproducible.
+    These weights are not learned attention and are not model attributions.
     """
 
-    attention_available = _attention_can_construct()
     layer_count = max(1, _num_hgt_layers(model))
-    method = (
-        "AttentionExplainer endpoint-conditioned proxy"
-        if attention_available
-        else "endpoint-conditioned proxy"
-    )
+    method = "endpoint-conditioned topology proxy (not HGT attention)"
     records: list[AttentionWeight] = []
     for layer in range(layer_count):
         for current_edge_type in data.edge_types:
@@ -79,8 +75,10 @@ def extract_hgt_attention_weights(
     records.sort(key=lambda item: item.weight, reverse=True)
     selected = records[:top_k]
     return {
-        "algorithm": "AttentionExplainer",
-        "attention_available": attention_available,
+        "algorithm": "endpoint_conditioned_topology_proxy",
+        "attention_available": False,
+        "model_attribution": False,
+        "causal_explanation": False,
         "method": method,
         "prediction": {
             "edge_type": list(edge_type),
@@ -196,14 +194,6 @@ def _num_hgt_layers(model: nn.Module) -> int:
         return len(convs)
     except TypeError:
         return 1
-
-
-def _attention_can_construct() -> bool:
-    try:
-        AttentionExplainer(reduce="mean")
-    except Exception:
-        return False
-    return True
 
 
 def _node_ids(data: HeteroData, node_type: str) -> list[str]:

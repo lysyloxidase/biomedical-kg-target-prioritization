@@ -5,6 +5,22 @@ theme:
   name: material
 nav:
   - Home: index.md
+  - Current-State Audit: audit-current-state.md
+  - Refactor Roadmap: refactor-roadmap.md
+  - Final Validation Report: final-validation-report.md
+  - Sample Dataset Card: dataset-card-sample.md
+  - Dataset Card: dataset-card.md
+  - Model Card: model-card.md
+  - Evaluation Protocol: evaluation-protocol.md
+  - Reproducibility: reproducibility.md
+  - Biomedical Limitations: biomedical-limitations.md
+  - API Safety: api-safety.md
+  - Security Exceptions: security-exceptions.md
+  - Split Protocol: split-protocol.md
+  - Leakage Prevention: leakage-prevention.md
+  - Negative Sampling and Baselines: negative-sampling-and-baselines.md
+  - GNN and Evaluation Protocol: gnn-evaluation-protocol.md
+  - Explainability and Safe API: explainability-and-api.md
   - Data Sources: data-sources.md
   - KG Schema: kg-schema.md
   - OA Biology: oa-biology.md

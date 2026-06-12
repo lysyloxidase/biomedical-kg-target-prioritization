@@ -11,9 +11,9 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
       - name: Sync docs environment
         run: uv sync --frozen --extra dev --no-editable
       - name: Deploy MkDocs to gh-pages
-        run: uv run --no-editable mkdocs gh-deploy --force
+        run: uv run --no-editable mkdocs gh-deploy --force --strict

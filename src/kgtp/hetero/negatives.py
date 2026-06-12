@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 from collections.abc import Mapping, Sequence
+from heapq import heappush, heapreplace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -71,43 +72,127 @@ def sample_negative_edges(
         else list(range(num_dst_nodes))
     )
 
-    if strategy == "hard" and hard_candidates_by_source:
+    rng = random.Random(seed)
+    if strategy == "random":
+        selected = _random_candidates(
+            source_nodes,
+            target_nodes,
+            forbidden,
+            num_samples=num_samples,
+            rng=rng,
+        )
+    elif strategy == "degree_matched":
+        selected = _degree_matched_candidates(
+            source_nodes,
+            target_nodes,
+            forbidden,
+            positive_edge_index=positive_edge_index,
+            num_samples=num_samples,
+            source_degrees=source_degrees,
+            target_degrees=target_degrees,
+            rng=rng,
+        )
+    elif strategy == "hard":
+        if hard_candidates_by_source is None:
+            msg = "Hard sampling requires train-derived hard_candidates_by_source"
+            raise ValueError(msg)
         candidates = _hard_candidates(
             source_nodes, hard_candidates_by_source, forbidden
         )
         if len(candidates) < num_samples:
-            candidates.extend(
-                candidate
-                for candidate in _all_candidates(source_nodes, target_nodes, forbidden)
-                if candidate not in set(candidates)
+            msg = (
+                f"Hard pool has {len(candidates)} eligible pairs; "
+                f"{num_samples} requested"
             )
+            raise ValueError(msg)
+        rng.shuffle(candidates)
+        selected = candidates[:num_samples]
     else:
-        candidates = _all_candidates(source_nodes, target_nodes, forbidden)
-
-    rng = random.Random(seed)
-    rng.shuffle(candidates)
-
-    if strategy == "degree_matched":
-        candidates.sort(
-            key=lambda pair: _degree_score(pair, source_degrees, target_degrees),
-            reverse=True,
-        )
-
-    selected = candidates[:num_samples]
+        msg = f"Unknown negative-sampling strategy: {strategy}"
+        raise ValueError(msg)
     return pairs_to_edge_index(selected)
 
 
-def _all_candidates(
+def _random_candidates(
     source_nodes: Sequence[int],
     target_nodes: Sequence[int],
     forbidden: set[EdgePair],
+    *,
+    num_samples: int,
+    rng: random.Random,
 ) -> list[EdgePair]:
-    return [
-        (source, target)
-        for source in source_nodes
-        for target in target_nodes
-        if (source, target) not in forbidden
-    ]
+    total = len(source_nodes) * len(target_nodes)
+    source_set = set(source_nodes)
+    target_set = set(target_nodes)
+    eligible = total - sum(
+        source in source_set and target in target_set for source, target in forbidden
+    )
+    if eligible < num_samples:
+        msg = f"Requested {num_samples} negatives but only {eligible} are eligible"
+        raise ValueError(msg)
+    selected: set[EdgePair] = set()
+    max_attempts = max(100, num_samples * 50)
+    attempts = 0
+    while len(selected) < num_samples and attempts < max_attempts:
+        pair = (rng.choice(source_nodes), rng.choice(target_nodes))
+        attempts += 1
+        if pair not in forbidden:
+            selected.add(pair)
+    if len(selected) < num_samples:
+        start = rng.randrange(total)
+        for offset in range(total):
+            index = (start + offset) % total
+            pair = (
+                source_nodes[index // len(target_nodes)],
+                target_nodes[index % len(target_nodes)],
+            )
+            if pair not in forbidden:
+                selected.add(pair)
+                if len(selected) == num_samples:
+                    break
+    return sorted(selected)
+
+
+def _degree_matched_candidates(
+    source_nodes: Sequence[int],
+    target_nodes: Sequence[int],
+    forbidden: set[EdgePair],
+    *,
+    positive_edge_index: torch.Tensor,
+    num_samples: int,
+    source_degrees: torch.Tensor | None,
+    target_degrees: torch.Tensor | None,
+    rng: random.Random,
+) -> list[EdgePair]:
+    if source_degrees is None or target_degrees is None:
+        msg = "Degree-matched sampling requires source and target train degrees"
+        raise ValueError(msg)
+    positive_sources = positive_edge_index[0].tolist()
+    positive_targets = positive_edge_index[1].tolist()
+    source_mean = sum(float(source_degrees[index]) for index in positive_sources) / len(
+        positive_sources
+    )
+    target_mean = sum(float(target_degrees[index]) for index in positive_targets) / len(
+        positive_targets
+    )
+    heap: list[tuple[float, float, EdgePair]] = []
+    for source in source_nodes:
+        for target in target_nodes:
+            pair = (source, target)
+            if pair in forbidden:
+                continue
+            distance = abs(float(source_degrees[source]) - source_mean) + abs(
+                float(target_degrees[target]) - target_mean
+            )
+            item = (-distance, rng.random(), pair)
+            if len(heap) < num_samples:
+                heappush(heap, item)
+            elif item > heap[0]:
+                heapreplace(heap, item)
+    if len(heap) < num_samples:
+        msg = f"Degree-matched pool has only {len(heap)} eligible pairs"
+        raise ValueError(msg)
+    return sorted(item[2] for item in heap)
 
 
 def _hard_candidates(
@@ -122,14 +207,3 @@ def _hard_candidates(
             if pair not in forbidden:
                 candidates.append(pair)
     return candidates
-
-
-def _degree_score(
-    pair: EdgePair,
-    source_degrees: torch.Tensor | None,
-    target_degrees: torch.Tensor | None,
-) -> float:
-    source, target = pair
-    source_score = float(source_degrees[source]) if source_degrees is not None else 0.0
-    target_score = float(target_degrees[target]) if target_degrees is not None else 0.0
-    return source_score + target_score

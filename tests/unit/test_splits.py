@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 import torch
 
 from kgtp.data.build_graph import assemble_canonical_edges, build_node_table
@@ -12,7 +13,7 @@ from kgtp.hetero.negatives import edge_index_to_pairs, sample_negative_edges
 from kgtp.hetero.splits import (
     DEFAULT_EDGE_TYPES,
     DEFAULT_REV_EDGE_TYPES,
-    leakage_free_random_link_split,
+    disjoint_random_link_split,
     load_splits,
     message_edge_pairs,
     save_splits,
@@ -165,7 +166,7 @@ def test_heterodata_export_has_all_node_types_features_metadata_and_maps(
 
 def test_split_leakage_guards_hold_for_supervision_edges(tmp_path) -> None:
     data = _phase2_heterodata(tmp_path)
-    bundle = leakage_free_random_link_split(
+    bundle = disjoint_random_link_split(
         data,
         seed=7,
         num_val=0.2,
@@ -216,7 +217,7 @@ def test_split_leakage_guards_hold_for_supervision_edges(tmp_path) -> None:
 
 def test_splits_save_reload_and_reproduce_for_same_seed(tmp_path) -> None:
     data = _phase2_heterodata(tmp_path / "heterodata")
-    first = leakage_free_random_link_split(
+    first = disjoint_random_link_split(
         data,
         seed=11,
         num_val=0.2,
@@ -224,7 +225,7 @@ def test_splits_save_reload_and_reproduce_for_same_seed(tmp_path) -> None:
         disjoint_train_ratio=0.4,
         eval_neg_sampling_ratio=2.0,
     )
-    second = leakage_free_random_link_split(
+    second = disjoint_random_link_split(
         data,
         seed=11,
         num_val=0.2,
@@ -289,3 +290,60 @@ def test_negative_sampling_strategies_exclude_positives_and_used_edges() -> None
     assert edge_index_to_pairs(random_neg).isdisjoint(forbidden)
     assert edge_index_to_pairs(degree_neg).isdisjoint(forbidden)
     assert edge_index_to_pairs(hard_neg).isdisjoint(forbidden)
+
+
+def test_legacy_negative_sampler_rejects_invalid_requests() -> None:
+    positive = torch.tensor([[0], [0]], dtype=torch.long)
+
+    assert sample_negative_edges(
+        num_src_nodes=2,
+        num_dst_nodes=2,
+        positive_edge_index=positive,
+        num_samples=0,
+        seed=1,
+    ).shape == (2, 0)
+    with pytest.raises(ValueError, match=r"only .* eligible"):
+        sample_negative_edges(
+            num_src_nodes=1,
+            num_dst_nodes=1,
+            positive_edge_index=positive,
+            num_samples=1,
+            seed=1,
+        )
+    with pytest.raises(ValueError, match="requires source and target train degrees"):
+        sample_negative_edges(
+            num_src_nodes=2,
+            num_dst_nodes=2,
+            positive_edge_index=positive,
+            num_samples=1,
+            seed=1,
+            strategy="degree_matched",
+        )
+    with pytest.raises(ValueError, match="requires train-derived"):
+        sample_negative_edges(
+            num_src_nodes=2,
+            num_dst_nodes=2,
+            positive_edge_index=positive,
+            num_samples=1,
+            seed=1,
+            strategy="hard",
+        )
+    with pytest.raises(ValueError, match="Hard pool has"):
+        sample_negative_edges(
+            num_src_nodes=2,
+            num_dst_nodes=2,
+            positive_edge_index=positive,
+            num_samples=2,
+            seed=1,
+            strategy="hard",
+            hard_candidates_by_source={0: [1]},
+        )
+    with pytest.raises(ValueError, match="Unknown negative-sampling strategy"):
+        sample_negative_edges(
+            num_src_nodes=2,
+            num_dst_nodes=2,
+            positive_edge_index=positive,
+            num_samples=1,
+            seed=1,
+            strategy="not-a-strategy",
+        )

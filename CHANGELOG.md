@@ -1,37 +1,60 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+All notable changes are documented here using Keep a Changelog conventions.
+The project uses pre-1.0 semantic versioning while the full biomedical
+benchmark remains incomplete.
 
-The format is based on Keep a Changelog 1.1.0, and this project adheres to
-Semantic Versioning.
+## [Unreleased]
 
-## [1.0.0] - 2026-06-11
+### Planned
+
+- Independent clean-room verification and release evidence.
+- Full-data acquisition and production-scale benchmark execution.
+
+## [0.2.0] - 2026-06-12
 
 ### Added
 
-- Phase 1 OA-centric data foundation: six-source policy, Ensembl-gene hub
-  normalization, canonical edge assembly, graph statistics, Neo4j loader, ADRs,
-  caveats, and license documentation.
-- Phase 2 PyG `HeteroData` export with five node types, per-type features,
-  node-index maps, leakage-free splits, negative sampling strategies, and
-  split-leakage CI tests.
-- Phase 3 OGB-style filtered evaluation metrics and seven non-graph baselines:
-  popularity, logistic regression, matrix factorization, text embeddings,
-  Node2Vec, centrality, and KGE baselines.
-- Phase 4 HGT hero model, GraphSAGE and R-GCN ablations, encoder-decoder link
-  prediction, multitask heads, leakage-free training, and multi-seed summaries.
-- Phase 5 empirical ablations: no-KG vs KG, KG vs KG+text, homogeneous vs
-  relational vs heterogeneous, and negative-sampling/layers/features design
-  grid with paired significance scaffolding and markdown/LaTeX table assembly.
-- Phase 6 interpretability: Captum/Integrated Gradients wrapper, HGT attention
-  records, meta-path explanations, known-target and hypothesis-framed case
-  studies, and explanatory subgraph figures.
-- Phase 7 productionization: optional FastAPI target-ranking endpoint, Docker
-  API image, full CI with lint/type/test/split-leakage/smoke-train/docker-build
-  gates, README credibility tables, smoke-train CLI, and v1.0.0 documentation.
+- Redistributable OA sample dataset and executable `make reproduce-small`
+  pipeline.
+- Split-first train-message graph and train-fitted structural features.
+- Distinct random, degree-matched, and train-only hard sampled-unlabeled
+  strategies.
+- Correctly named adjacency SVD, biased-walk Node2Vec, text, matrix
+  factorization, MLP, and KGE baseline implementations.
+- HGT, heterogeneous and homogeneous GraphSAGE, and R-GCN multi-seed runner.
+- Full-candidate and sampled-unlabeled evaluation with ranking, calibration,
+  enrichment, uncertainty summaries, and paired comparisons.
+- Trained-artifact-only explainability and fail-closed API behavior.
+- Run-level provenance manifests, risk-based coverage gates, security scans,
+  container health checks, and non-root container execution.
 
-### Caveats
+### Changed
 
-- Full OA benchmark result tables require generated artifacts under `reports/`.
-  This source checkout keeps missing full-run numbers explicit rather than
-  replacing them with synthetic metrics.
+- API, package, and documentation versions are aligned at `0.2.0`.
+- Claims are limited to the executable sample pipeline; no full-scale
+  scientific benchmark result is claimed.
+- Model explanations are described as non-causal attributions.
+- Neo4j credentials must be supplied through environment variables.
+
+### Security
+
+- Removed hard-coded default passwords.
+- API readiness requires validated checkpoint, graph, feature, split,
+  validation, and run manifests.
+- Added dependency and static security scans to CI.
+
+### Known limitations
+
+- Sample metrics validate software execution only.
+- Full-scale data acquisition, tuning, external validation, and prospective
+  biological validation have not been completed.
+- Optional Sentence Transformer and PubMedBERT arms are unavailable unless
+  their explicit dependencies and model weights are installed.
+
+## [0.1.0] - 2026-06-11
+
+### Added
+
+- Initial research scaffold, data-source policy, graph schema, model
+  prototypes, tests, and documentation.

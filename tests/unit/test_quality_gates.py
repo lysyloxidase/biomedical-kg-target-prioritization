@@ -48,25 +48,78 @@ def test_phase7_production_docs_and_ci_gates_are_present() -> None:
     dockerfile = (ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
 
     for section in (
-        "Headline Results",
-        "Ablations",
-        "Graph Statistics",
-        "Interpretability Case Study",
-        "Honest Findings",
-        "Data Sources And Licenses",
-        "Reproducibility",
+        "Current Status",
+        "Task Definition",
+        "Sample Dataset",
+        "Pipeline Architecture",
+        "Leakage Protection",
+        "Implemented Models",
+        "Evaluation",
+        "Artifacts",
+        "Full-Data Prerequisites",
+        "Licenses",
+        "Limitations",
     ):
         assert section in readme
     assert "AUPRC" in readme
     assert "Computational hypothesis" in readme
-    assert "pending full OA run" in readme
-    assert "tests/unit/test_splits.py" in ci
+    assert "No real full-scale benchmark results" in readme
+    assert "test_leakage_prevention.py" in ci
+    assert "test_unlabeled_sampling.py" in ci
+    assert "test_sample_pipeline.py" in ci
+    assert "test_api_safety.py" in ci
     assert "smoke-train" in ci
     assert "docker build" in ci
     assert "pytest --cov=kgtp" in ci
+    assert "pip-audit" in ci
+    assert "bandit" in ci
+    assert "check_coverage.py" in ci
     assert "mkdocs gh-deploy" in docs
-    assert "uvicorn" in dockerfile
-    assert "## [1.0.0] - 2026-06-11" in changelog
+    assert "USER kgtp" in dockerfile
+    assert "chown -R" not in dockerfile
+    assert "HEALTHCHECK" in dockerfile
+    assert 'CMD ["/app/.venv/bin/uvicorn"' in dockerfile
+    assert "## [0.2.0] - 2026-06-12" in changelog
+
+
+def test_required_phase7_docs_and_secret_examples_are_safe() -> None:
+    required_docs = (
+        "dataset-card.md",
+        "model-card.md",
+        "evaluation-protocol.md",
+        "final-validation-report.md",
+        "leakage-prevention.md",
+        "reproducibility.md",
+        "biomedical-limitations.md",
+        "api-safety.md",
+    )
+    assert all((ROOT / "docs" / name).is_file() for name in required_docs)
+    assert (ROOT / "SECURITY.md").is_file()
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    compose = (ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
+    config = (ROOT / "src" / "kgtp" / "config.py").read_text(encoding="utf-8")
+    assert "neo4j/password" not in compose
+    assert 'password: str = "password"' not in config
+    assert "replace-with-a-strong-local-password" in env_example
+    assert ".env" in dockerignore
+    assert "artifacts" in dockerignore
+
+
+def test_github_actions_are_pinned_to_commits() -> None:
+    workflows = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+    uses_lines = [
+        line.strip()
+        for workflow in workflows
+        for line in workflow.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("- uses:")
+    ]
+
+    assert uses_lines
+    for line in uses_lines:
+        reference = line.split("@", maxsplit=1)[1].split(maxsplit=1)[0]
+        assert len(reference) == 40
+        assert all(character in "0123456789abcdef" for character in reference)
 
 
 def test_open_targets_count_is_read_from_graphql(monkeypatch) -> None:

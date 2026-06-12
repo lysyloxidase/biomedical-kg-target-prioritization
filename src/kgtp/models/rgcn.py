@@ -6,6 +6,7 @@ from typing import cast
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 from torch_geometric.nn import Linear
 
 from kgtp.models.hgt import Metadata
@@ -20,13 +21,16 @@ class RGCNEncoder(nn.Module):
         num_layers: int,
         metadata: Metadata,
         *,
-        num_bases: int | None = None,
+        dropout: float = 0.2,
+        residual: bool = True,
+        normalization: bool = True,
     ) -> None:
         super().__init__()
-        del num_bases
         node_types, edge_types = metadata
         self.node_types = node_types
         self.edge_types = edge_types
+        self.dropout = dropout
+        self.residual = residual
         self.lin_dict = nn.ModuleDict(
             {node_type: Linear(-1, hidden_channels) for node_type in node_types}
         )
@@ -54,6 +58,21 @@ class RGCNEncoder(nn.Module):
                 for _ in range(num_layers)
             ]
         )
+        self.norms = nn.ModuleList(
+            [
+                nn.ModuleDict(
+                    {
+                        node_type: (
+                            nn.LayerNorm(hidden_channels)
+                            if normalization
+                            else nn.Identity()
+                        )
+                        for node_type in node_types
+                    }
+                )
+                for _ in range(num_layers)
+            ]
+        )
 
     def forward(
         self,
@@ -66,9 +85,15 @@ class RGCNEncoder(nn.Module):
             node_type: self.lin_dict[node_type](features).relu()
             for node_type, features in x_dict.items()
         }
-        for self_lins, rel_lins in zip(self.self_lins, self.rel_lins, strict=True):
+        for self_lins, rel_lins, norms in zip(
+            self.self_lins,
+            self.rel_lins,
+            self.norms,
+            strict=True,
+        ):
             self_lin_dict = cast(nn.ModuleDict, self_lins)
             rel_lin_dict = cast(nn.ModuleDict, rel_lins)
+            norm_dict = cast(nn.ModuleDict, norms)
             out = {
                 node_type: self_lin_dict[node_type](z_dict[node_type])
                 for node_type in self.node_types
@@ -94,10 +119,17 @@ class RGCNEncoder(nn.Module):
                 out[dst_type].index_add_(0, edge_index[1], messages)
                 ones = torch.ones(messages.size(0), 1, device=messages.device)
                 counts[dst_type].index_add_(0, edge_index[1], ones)
-            z_dict = {
-                node_type: (out[node_type] / counts[node_type].clamp_min(1.0)).relu()
-                for node_type in self.node_types
-            }
+            next_dict: dict[str, torch.Tensor] = {}
+            for node_type in self.node_types:
+                updated = F.dropout(
+                    F.relu(out[node_type] / counts[node_type].clamp_min(1.0)),
+                    p=self.dropout,
+                    training=self.training,
+                )
+                next_dict[node_type] = norm_dict[node_type](
+                    z_dict[node_type] + updated if self.residual else updated
+                )
+            z_dict = next_dict
         return z_dict
 
 

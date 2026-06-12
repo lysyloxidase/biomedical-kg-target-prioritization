@@ -1,6 +1,6 @@
 project:
   name: biomedical-kg-target-prioritization
-  phase: 1
+  phase: 7
 paths:
   raw: data/raw
   interim: data/interim

@@ -1,1 +1,1 @@
-"""Phase 2 PyG HeteroData exports and leakage-free splits."""
+"""PyG graph export, split protocols, and train-fitted features."""

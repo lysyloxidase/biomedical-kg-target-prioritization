@@ -16,9 +16,9 @@ SAFE_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 class Neo4jConfig:
     """Neo4j connection configuration."""
 
+    password: str
     uri: str = "bolt://localhost:7687"
     user: str = "neo4j"
-    password: str = "password"
     database: str = "neo4j"
 
 

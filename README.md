@@ -1,182 +1,268 @@
 # biomedical-kg-target-prioritization
 
-The first open, reproducible heterogeneous-GNN link-prediction benchmark scaffold
-for knee osteoarthritis target prioritization: HGT, GraphSAGE, R-GCN, seven
-non-graph baselines, leakage-free splits, filtered OGB-style metrics, empirical
-ablations, and interpretable target rationales.
+[![CI](https://github.com/lysyloxidase/biomedical-kg-target-prioritization/actions/workflows/ci.yml/badge.svg)](https://github.com/lysyloxidase/biomedical-kg-target-prioritization/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Author: `lysyloxidase`
+Research software for OA-centric biomedical knowledge-graph target
+prioritization. Version `0.2.0` provides an executable, redistributable sample
+pipeline. It does not provide a completed full-scale benchmark or validated
+drug-target discoveries.
 
-Computational hypothesis generation for target prioritization only. This is not
-validated drug-target discovery, not clinical advice, and not a treatment
-recommendation.
+Computational hypothesis generation only. This repository does not diagnose
+disease, recommend treatment, establish causality, or provide clinical advice.
+
+## Current Status
+
+Release maturity: **alpha**. The complete sample workflow, safety checks, and
+Docker image are exercised in CI. See the
+[`final validation report`](docs/final-validation-report.md) for command-level
+evidence and remaining release limitations.
+
+Implemented and tested:
+
+- a checked-in knee-OA sample dataset with source and license metadata;
+- identifier normalization and canonical Parquet graph assembly;
+- split-first disease-gene, drug-gene, and gene-pathway supervision;
+- train-message-only structural features and PyG `HeteroData`;
+- sampled-unlabeled strategies, baseline models, and four GNN families;
+- five-seed evaluation, trained-artifact explanations, and a fail-closed API;
+- run, dataset, graph, split, feature, checkpoint, and stage manifests.
+
+Not completed:
+
+- production-scale source acquisition and graph construction;
+- full-data hyperparameter selection and external validation;
+- prospective or experimental biological validation;
+- scientific claims based on the sample metrics.
+
+No real full-scale benchmark results are included in this checkout.
+
+## Task Definition
+
+The primary link-prediction task is:
+
+```text
+disease -> associated_with -> gene
+```
+
+The sample query is knee osteoarthritis, `EFO_0004616`. Eligible genes are
+ranked with full-candidate evaluation. Other known disease-gene positives are
+filtered for ranking metrics. Drug-gene and gene-pathway links are optional
+auxiliary tasks with explicit loss weights.
+
+Pairs absent from the registry are called `unlabeled`, not biological
+negatives. The repository contains no curated negative set.
 
 ## Quickstart
+
+Requirements: Python 3.11 or newer, `uv`, and a platform supported by PyTorch.
+Neo4j is optional.
 
 ```bash
 git clone https://github.com/lysyloxidase/biomedical-kg-target-prioritization
 cd biomedical-kg-target-prioritization
-docker compose -f docker/docker-compose.yml up -d
 make setup
-make reproduce
+make reproduce-small
+make test
 ```
 
-For CI-scale verification without the full OA data build:
+Without Make:
 
 ```bash
-make test
-make smoke-train
+uv sync --frozen --extra dev --no-editable
+uv run kgtp reproduce-small
+uv run pytest -q
+```
+
+`make reproduce-small` performs real local work and writes the current manifest
+to `artifacts/sample/manifests/run.json` plus an immutable run-id-specific copy
+under `artifacts/sample/manifests/runs/`. The manifest records the Git state,
+locked dependencies, effective configuration, source versions and licenses,
+input hashes, graph/split/feature/checkpoint hashes, seeds, command, and status.
+
+`make reproduce` intentionally fails because the production workflow is not
+yet complete.
+
+### Pipeline Commands
+
+Each stage validates its prerequisites and writes deterministic artifacts under
+`artifacts/sample/`:
+
+| Stage | Command | Main output |
+| --- | --- | --- |
+| Validate sample | `uv run kgtp prepare-sample` | dataset manifest |
+| Normalize identifiers | `uv run kgtp normalize` | normalized Parquet tables |
+| Assemble graph | `uv run kgtp assemble` | full reference graph |
+| Split supervision | `uv run kgtp split` | train/validation/test splits |
+| Fit features | `uv run kgtp features` | train-fitted features and PyG graph |
+| Train baselines | `uv run kgtp train-baselines` | baseline models and metrics |
+| Train GNNs | `uv run kgtp train-gnn` | per-seed GNN checkpoints |
+| Evaluate | `uv run kgtp evaluate` | unified evaluation metrics |
+| Report | `uv run kgtp report` | Markdown and machine-readable reports |
+
+Use `uv run kgtp --help` or `uv run kgtp <command> --help` for the complete CLI
+reference.
+
+### Open In A Browser
+
+After `make reproduce-small` completes, start the validated-artifact API:
+
+```bash
 make api
 ```
 
-`make api` serves the optional FastAPI app at `http://localhost:8000` with:
+Open:
 
-- `GET /health`
-- `GET /graph-stats`
-- `GET /predict?disease=EFO_0004616&top_k=20`
+- dashboard: <http://127.0.0.1:8000>
+- health and artifact status: <http://127.0.0.1:8000/health>
+- interactive OpenAPI documentation: <http://127.0.0.1:8000/docs>
 
-The API loads `data/processed/heterodata/heterodata.pt` and
-`reports/models/hgt_seed13/model.pt` when present. Otherwise it falls back to a
-tiny deterministic smoke graph so the service can be tested on a fresh clone.
+The server fails closed with HTTP 503 when required artifacts are absent,
+untrained, corrupted, or incompatible. `KGTP_DEMO_MODE=true` is an explicit
+non-scientific demo mode and is never enabled implicitly.
 
-## Headline Results
+## Sample Dataset
 
-Primary metric: AUPRC. AUROC is reported but optimistic under sparse-link
-imbalance. Ranking metrics are filtered in the OGB/KG style. The current checkout
-does not include saved full-run `reports/results_*.json` artifacts, so the table
-below is intentionally marked pending rather than filled with synthetic numbers.
+`data/sample/` is a deterministic, incomplete OA-oriented snapshot containing
+232 nodes and six biomedical edge tables. It combines attributed records from
+Open Targets, STRING, Reactome, ChEMBL, UniProt, Ensembl, and GOA/QuickGO.
 
-Disease->gene, mean +/- std over at least five seeds, filtered:
+The sample is intended for software integration, leakage tests, and tutorial
+execution. It is not a comprehensive OA knowledge base. See
+[`docs/dataset-card.md`](docs/dataset-card.md) and
+[`docs/dataset-card-sample.md`](docs/dataset-card-sample.md).
 
-| Model | AUROC | AUPRC | Hits@10 | MRR |
-|---|---:|---:|---:|---:|
-| Popularity (degree) | pending full OA run | pending full OA run | pending full OA run | pending full OA run |
-| Logistic Regression (features) | pending full OA run | pending full OA run | pending full OA run | pending full OA run |
-| Matrix Factorization | pending full OA run | pending full OA run | pending full OA run | pending full OA run |
-| Node2Vec | pending full OA run | pending full OA run | pending full OA run | pending full OA run |
-| Text embeddings (PubMedBERT) | pending full OA run | pending full OA run | pending full OA run | pending full OA run |
-| TransE / DistMult / ComplEx / RotatE | pending full OA run | pending full OA run | pending full OA run | pending full OA run |
-| GraphSAGE (to_hetero) | pending full OA run | pending full OA run | pending full OA run | pending full OA run |
-| R-GCN | pending full OA run | pending full OA run | pending full OA run | pending full OA run |
-| **HGT (hero)** | pending full OA run | pending full OA run | pending full OA run | pending full OA run |
+## Pipeline Architecture
 
-## Ablations
+```text
+checked-in sample
+  -> normalize identifiers
+  -> assemble full reference graph
+  -> split target and auxiliary relations
+  -> construct train message graph
+  -> fit feature transformer on train graph
+  -> build shared PyG views
+  -> train baselines and GNNs
+  -> evaluate held-out supervision
+  -> report, explain, and serve validated artifacts
+```
 
-Every cell should be mean +/- std over at least five seeds and regenerated from
-saved per-seed reports under `reports/ablations/`.
+The full reference graph is reserved for provenance, known-positive checks, and
+filtered evaluation. It is not used for training-time structural features.
 
-**Ablation 1+2: no-KG vs KG vs KG+text**
+## Leakage Protection
 
-| Setting | AUROC | AUPRC | Hits@10 | MRR |
-|---|---:|---:|---:|---:|
-| no-KG (LR/MLP, features) | pending full OA run | pending full OA run | pending full OA run | pending full OA run |
-| KG (HGT, structural) | pending full OA run | pending full OA run | pending full OA run | pending full OA run |
-| KG+text (HGT + PubMedBERT) | pending full OA run | pending full OA run | pending full OA run | pending full OA run |
+Validation and test target edges, including reverse edges, are absent from the
+train message graph. Degree, PageRank, GO vocabulary, annotation statistics,
+and hard sampled-unlabeled pools are fitted from train-permitted information.
+Split and feature hashes are checked before training, evaluation, explanation,
+and API serving.
 
-**Ablation 3: homogeneous vs relational vs heterogeneous**
+This is a transductive protocol with shared node identities and non-target
+relations. It is not described as universally leakage-free. Exact guarantees
+and residual risks are in
+[`docs/leakage-prevention.md`](docs/leakage-prevention.md).
 
-| Setting | AUROC | AUPRC | Hits@10 | MRR |
-|---|---:|---:|---:|---:|
-| GraphSAGE (homogeneous / to_hetero) | pending full OA run | pending full OA run | pending full OA run | pending full OA run |
-| R-GCN | pending full OA run | pending full OA run | pending full OA run | pending full OA run |
-| HGT | pending full OA run | pending full OA run | pending full OA run | pending full OA run |
+## Implemented Models
 
-**Ablation 4: design knobs**
+Sample pipeline:
 
-The design grid crosses negative sampling (`random`, `degree_matched`, `hard`),
-layers (`1`, `2`, `3`), and node features (`one-hot`, `structural`, `ESM`,
-`text`). The table is emitted as markdown and LaTeX by `make ablate` from saved
-Phase 5 reports. Random negatives are expected to inflate AUROC relative to hard
-negatives; AUPRC and filtered MRR are the more credible signals.
+- random, degree/popularity, source-score, logistic regression, gradient
+  boosting, matrix factorization, and feature MLP;
+- `AdjacencySVDBaseline`;
+- true Node2Vec using biased walks and skip-gram training;
+- hash-text baseline;
+- DistMult and ComplEx;
+- HGT, relation-wise heterogeneous GraphSAGE, homogeneous GraphSAGE control,
+  and R-GCN.
 
-## Graph Statistics
+The code also provides explicit TransE and RotatE scoring implementations.
+Sentence Transformer and PubMedBERT are optional arms. They fail clearly and
+are marked unavailable when their dependencies or weights are absent; they
+never silently fall back to hash vectors. In the default locked environment,
+both optional transformer arms are unavailable.
 
-The production graph-statistics table is emitted by `make graph` and by
-`GET /graph-stats`. Pending full OA graph build:
+## Evaluation
 
-| Node type | Count |   | Edge type | Count |
-|---|---:|---|---|---:|
-| Disease | pending full OA build |   | associated_with | pending full OA build |
-| Gene | pending full OA build |   | interacts (PPI) | pending full OA build |
-| Pathway | pending full OA build |   | participates_in | pending full OA build |
-| Drug | pending full OA build |   | targets | pending full OA build |
-| GOTerm | pending full OA build |   | annotated_with | pending full OA build |
+All models use the same split and candidate protocol. Reports distinguish:
 
-Additional graph statistics: density, mean degree, degree distribution, and
-positive disease->gene link count.
+- full-candidate ranking over all eligible genes;
+- random, degree-matched, and hard sampled-unlabeled evaluation.
 
-## Interpretability Case Study
+Metrics include AUPRC, AUROC, MRR, Hits@K, Precision@K, Recall@K, NDCG@K,
+enrichment, lift over popularity, and calibration where probabilities exist.
+Five fixed seeds produce raw metrics, means, standard deviations, confidence
+intervals, paired bootstrap intervals, and sign-flip comparisons.
 
-Phase 6 generates known-target and novel-prediction rationales:
+AUPRC values from different candidate prevalence must not be compared without
+qualification. See
+[`docs/evaluation-protocol.md`](docs/evaluation-protocol.md).
 
-- Known-target sanity checks: `GDF5` and `MMP13` when present in the graph.
-- Expected biology: Wnt/beta-catenin, TGF-beta/BMP, cartilage and extracellular
-  matrix pathways, and OA-relevant PPI neighbors.
-- Novel predictions are explicitly flagged as computational hypotheses, not
-  validated targets.
-- Figures are saved to `reports/figures/` as PNG/PDF explanatory subgraphs.
+## Artifacts
 
-Run:
+The sample run writes:
+
+```text
+artifacts/sample/
+  manifests/       run, source, dataset, and stage manifests
+  normalized/      normalized Parquet tables
+  graph/           full reference graph
+  train_message_graph/
+  splits/          supervision, registry, and sampled-unlabeled sets
+  features/        PyG graph, node maps, fitted transformer
+  models/          baseline and per-seed GNN checkpoints
+  metrics/         per-model, per-seed, and comparison metrics
+  report/          benchmark and explanation outputs
+```
+
+Generated artifacts are not committed. Sample metrics validate executable
+plumbing and must not be presented as scientific benchmark results.
+
+## Explainability And API
 
 ```bash
 make explain
+make api
 ```
 
-## Honest Findings
+Integrated Gradients and edge occlusion are model attributions, not causal
+explanations. Evidence cards include pathways, PPI neighbors, GO terms, drug
+information, provenance, uncertainty limitations, and hypothesis warnings.
 
-This project is designed to report what the ablations actually show:
+The API returns HTTP 503 unless checkpoint, graph, features, split, validation,
+node map, dataset, and run manifests are present and mutually compatible.
+Synthetic demo behavior requires `KGTP_DEMO_MODE=true` and is prominently
+marked non-scientific. See [`docs/api-safety.md`](docs/api-safety.md).
 
-- If HGT does not beat logistic regression on node features, the headline is
-  that graph message passing adds little under this sparse supervision setting.
-- If text embeddings dominate, the narrative should pivot to text co-occurrence
-  being the main signal and quantify what the graph adds.
-- If R-GCN or GraphSAGE match HGT, the result is evidence that heterogeneous
-  attention is not necessary for this OA graph.
+## Full-Data Prerequisites
 
-Absolute MRR/Hits should not be compared directly with ogbl-biokg leaderboard
-numbers because this OA graph is intentionally tiny. The contribution is the
-controlled comparison, leakage prevention, and interpretability layer rather
-than state-of-the-art leaderboard performance.
+A future full run requires:
 
-## Data Sources And Licenses
+- legally permitted access to every upstream source and acceptance of its
+  current terms;
+- pinned releases, raw checksums, redistribution review, and sufficient disk;
+- production neighbor sampling or graph partitioning;
+- a documented compute budget and model-selection protocol;
+- temporal or otherwise justified evaluation splits;
+- independent biological and statistical review.
 
-| Source | Role | License / policy |
-|---|---|---|
-| Open Targets | disease-target associations | CC0 |
-| STRING v12 | PPI expansion | CC-BY-4.0 |
-| Reactome | pathways and hierarchy | CC-BY-4.0 |
-| ChEMBL 35 | drug-target mechanisms | CC-BY-SA-3.0 |
-| UniProt | gene/protein annotation | CC-BY-4.0 |
-| GO / GOA | GO terms and annotations | CC-BY-4.0 |
+Neo4j credentials are optional and must be supplied through environment
+variables. See `.env.example`; never commit `.env`.
 
-DisGeNET is excluded because the 2024 freemium redistribution policy is not
-compatible with this open benchmark. Ground-truth context is documented in
-`docs/oa-biology.md`; data caveats are documented in `docs/caveats.md`.
+## Licenses
 
-## Reproducibility
+Code is Apache-2.0. Source data retain upstream terms. The sample includes CC0,
+CC-BY-4.0, and CC-BY-SA-3.0 inputs; ChEMBL-derived redistribution therefore
+requires attention to share-alike obligations. DisGeNET is excluded from the
+redistributable sample.
 
-- Pinned source releases and fixed seeds.
-- Saved node-index maps and split seeds.
-- Leakage-free `RandomLinkSplit` with disjoint message-passing and supervision
-  edges.
-- Split-leakage tests run explicitly in CI.
-- Smoke-train gate runs HGT on a tiny synthetic heterogeneous graph.
-- Docker build gate validates the production image.
-- `make reproduce` runs the full pipeline targets end to end when data artifacts
-  and saved reports are available.
+See [`docs/data-sources.md`](docs/data-sources.md) and the dataset cards.
 
-## Canonical Edge Types
+## Limitations
 
-| Source type | Relation | Target type | Source |
-|---|---|---|---|
-| Disease | associated_with | Gene | Open Targets |
-| Gene | interacts | Gene | STRING |
-| Gene | participates_in | Pathway | Reactome |
-| Drug | targets | Gene | ChEMBL |
-| Gene | annotated_with | GOTerm | GOA |
-| Pathway | parent_of | Pathway | Reactome optional |
+The sample is small, literature and curation bias remain, unlabeled pairs may
+be unknown positives, and non-target context is transductive and not temporally
+partitioned. Checkpoints use trusted-local PyTorch serialization. Explanation
+stability and probability calibration are not established for clinical use.
 
-## License
-
-Code is Apache-2.0. Figures are CC-BY-4.0. Source data retain their upstream
-licenses; see `docs/data-sources.md`.
+See [`docs/biomedical-limitations.md`](docs/biomedical-limitations.md).

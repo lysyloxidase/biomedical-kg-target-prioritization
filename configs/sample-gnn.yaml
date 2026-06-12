@@ -1,0 +1,24 @@
+schema_version: 1
+seeds: [13, 17, 19, 23, 29]
+models:
+  - hgt
+  - graphsage
+  - graphsage_homogeneous
+  - rgcn
+training:
+  hidden_channels: 8
+  num_layers: 1
+  num_heads: 2
+  decoder_name: dot
+  learning_rate: 0.01
+  weight_decay: 0.0001
+  max_epochs: 5
+  patience: 3
+  dropout: 0.2
+  residual: true
+  normalization: true
+  device: auto
+task_weights:
+  disease_gene: 1.0
+  drug_gene: 0.25
+  gene_pathway: 0.25

@@ -69,14 +69,16 @@ def hashed_vector(text: str, *, dim: int = 64, signed: bool = True) -> np.ndarra
 def node_feature(
     node_id: str,
     node_features: Mapping[str, Sequence[float]] | None,
-    *,
-    dim: int = 16,
 ) -> np.ndarray:
-    """Return explicit node features or a deterministic ID embedding fallback."""
+    """Return explicit features and fail when the requested node is unavailable."""
 
-    if node_features is not None and node_id in node_features:
-        return np.asarray(node_features[node_id], dtype=float)
-    return hashed_vector(node_id, dim=dim)
+    if node_features is None:
+        msg = "This baseline requires explicit node features"
+        raise ValueError(msg)
+    if node_id not in node_features:
+        msg = f"Missing explicit features for node {node_id}"
+        raise KeyError(msg)
+    return np.asarray(node_features[node_id], dtype=float)
 
 
 def sigmoid(value: float) -> float:
@@ -92,17 +94,18 @@ def sigmoid(value: float) -> float:
 def pair_feature_vector(
     triple: Triple,
     node_features: Mapping[str, Sequence[float]] | None,
-    *,
-    dim: int = 16,
 ) -> np.ndarray:
     """Concatenate source, tail, absolute-difference and product features."""
 
     head, _, tail = triple
-    head_features = node_feature(head, node_features, dim=dim)
-    tail_features = node_feature(tail, node_features, dim=dim)
-    width = min(len(head_features), len(tail_features))
-    head_features = head_features[:width]
-    tail_features = tail_features[:width]
+    head_features = node_feature(head, node_features)
+    tail_features = node_feature(tail, node_features)
+    if len(head_features) != len(tail_features):
+        msg = (
+            f"Pair features require equal dimensions, got "
+            f"{len(head_features)} and {len(tail_features)}"
+        )
+        raise ValueError(msg)
     return np.concatenate(
         [
             head_features,

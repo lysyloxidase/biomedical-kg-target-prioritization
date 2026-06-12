@@ -178,24 +178,12 @@ def build_phase6_case_studies(
             )
         )
 
-    while len(results) < min_predictions:
-        fallback = select_novel_prediction(
-            [],
-            positives | {(result.disease_idx, result.gene_idx) for result in results},
-            disease_idx=disease_idx,
-            num_genes=int(data["gene"].num_nodes),
+    if len(results) < min_predictions:
+        msg = (
+            f"Only {len(results)} model-scored explanation candidates were available; "
+            "index-order fallback is prohibited"
         )
-        results.append(
-            _build_case_study(
-                explainer,
-                data,
-                fallback,
-                output_dir=output,
-                case_name=f"novel_hypothesis_{_gene_symbol(data, fallback.gene_idx).lower()}",
-                is_known_target=False,
-                is_hypothesis=True,
-            )
-        )
+        raise ValueError(msg)
 
     payload_path = output / "case_studies.json"
     payload_path.write_text(
@@ -240,10 +228,7 @@ def select_novel_prediction(
         if (candidate.disease_idx, candidate.gene_idx) not in positives:
             return candidate
 
-    for gene_idx in range(num_genes):
-        if (disease_idx, gene_idx) not in positives:
-            return PredictionCandidate(disease_idx, gene_idx, math.nan)
-    msg = "No novel disease-gene candidate is available"
+    msg = "No model-scored novel disease-gene candidate is available"
     raise ValueError(msg)
 
 

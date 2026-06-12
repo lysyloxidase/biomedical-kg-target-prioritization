@@ -37,7 +37,7 @@ def auroc(
 def auprc(
     y_true: Sequence[int] | np.ndarray, y_score: Sequence[float] | np.ndarray
 ) -> float:
-    """Return average precision, the primary metric for sparse positives."""
+    """Return tie-aware average precision for sparse positives."""
 
     labels = np.asarray(y_true, dtype=int)
     scores = np.asarray(y_score, dtype=float)
@@ -45,11 +45,26 @@ def auprc(
     if positives == 0:
         return math.nan
     order = np.argsort(-scores, kind="mergesort")
-    ordered = labels[order]
-    true_positive_count = np.cumsum(ordered)
-    positions = np.arange(1, len(ordered) + 1)
-    precision_at_k = true_positive_count / positions
-    return float((precision_at_k * ordered).sum() / positives)
+    ordered_labels = labels[order]
+    ordered_scores = scores[order]
+    true_positives = 0
+    seen = 0
+    average_precision = 0.0
+    start = 0
+    while start < len(ordered_scores):
+        end = start + 1
+        while (
+            end < len(ordered_scores) and ordered_scores[end] == ordered_scores[start]
+        ):
+            end += 1
+        group_positives = int(ordered_labels[start:end].sum())
+        true_positives += group_positives
+        seen = end
+        precision = true_positives / seen
+        recall_increment = group_positives / positives
+        average_precision += precision * recall_increment
+        start = end
+    return float(average_precision)
 
 
 def hits_at_k(ranks: Sequence[float] | np.ndarray, k: int) -> float:
@@ -68,6 +83,47 @@ def mrr(ranks: Sequence[float] | np.ndarray) -> float:
     if values.size == 0:
         return math.nan
     return float((1.0 / values).mean())
+
+
+def expected_calibration_error(
+    y_true: Sequence[int] | np.ndarray,
+    probabilities: Sequence[float] | np.ndarray,
+    *,
+    bins: int = 10,
+) -> float:
+    """Return equal-width expected calibration error."""
+
+    labels = np.asarray(y_true, dtype=float)
+    probs = np.asarray(probabilities, dtype=float)
+    if labels.size == 0:
+        return math.nan
+    error = 0.0
+    boundaries = np.linspace(0.0, 1.0, bins + 1)
+    for index in range(bins):
+        lower = boundaries[index]
+        upper = boundaries[index + 1]
+        mask = (probs >= lower) & (
+            probs <= upper if index == bins - 1 else probs < upper
+        )
+        if not mask.any():
+            continue
+        confidence = float(probs[mask].mean())
+        accuracy = float(labels[mask].mean())
+        error += float(mask.mean()) * abs(accuracy - confidence)
+    return error
+
+
+def brier_score(
+    y_true: Sequence[int] | np.ndarray,
+    probabilities: Sequence[float] | np.ndarray,
+) -> float:
+    """Return mean squared probability error."""
+
+    labels = np.asarray(y_true, dtype=float)
+    probs = np.asarray(probabilities, dtype=float)
+    if labels.size == 0:
+        return math.nan
+    return float(np.mean((probs - labels) ** 2))
 
 
 def filtered_ranks(
@@ -113,7 +169,7 @@ def sample_negative_triples(
     negatives_per_positive: int = 1_000,
     seed: int = 13,
 ) -> list[Triple]:
-    """Sample negatives per positive, or all eligible tails if fewer exist."""
+    """Sample unobserved tails, excluding every registered positive."""
 
     rng = random.Random(seed)
     known = set(all_known)
@@ -172,9 +228,9 @@ def evaluate_binary_and_ranking(
     tail_candidates: Mapping[Query, Sequence[str]],
     negatives_per_positive: int = 1_000,
     seed: int = 13,
-    ks: Sequence[int] = (1, 3, 10),
+    ks: Sequence[int] = (1, 3, 10, 50),
 ) -> dict[str, object]:
-    """Evaluate a triple scorer with sampled negatives and raw/filtered ranking."""
+    """Evaluate a scorer with sampled unlabeled pairs and filtered ranking."""
 
     negatives = sample_negative_triples(
         positives,
@@ -199,6 +255,15 @@ def evaluate_binary_and_ranking(
 
     raw = _rank_metrics(raw_ranks, ks)
     filtered_metrics = _rank_metrics(filt_ranks, ks)
+    filtered_metrics.update(
+        _query_topk_metrics(
+            candidate_scores,
+            positives,
+            all_known=all_known,
+            ks=ks,
+        )
+    )
+    prevalence = len(positives) / len(triples) if triples else math.nan
     return {
         "primary_metric": "AUPRC",
         "auroc_note": "AUROC is optimistic under sparse-link imbalance.",
@@ -209,15 +274,196 @@ def evaluate_binary_and_ranking(
         "raw_ranks": raw_ranks.tolist(),
         "filtered_ranks": filt_ranks.tolist(),
         "num_positives": len(positives),
-        "num_negatives": len(negatives),
-        "negatives_per_positive": negatives_per_positive,
+        "unlabeled_count": len(negatives),
+        "candidate_prevalence": prevalence,
+        "candidate_prevalence_warning": (
+            "AUPRC is prevalence-dependent; compare only runs using the same "
+            "candidate protocol and prevalence."
+        ),
+        "unlabeled_per_positive": negatives_per_positive,
+        "label_semantics": {"1": "positive", "0": "unlabeled"},
     }
+
+
+def evaluate_full_candidate(
+    scorer: TripleScorer,
+    positives: Sequence[Triple],
+    *,
+    all_known: Sequence[Triple] | set[Triple],
+    tail_candidates: Mapping[Query, Sequence[str]],
+    probability_scorer: TripleScorer | None = None,
+    ks: Sequence[int] = (1, 3, 10, 50),
+) -> dict[str, object]:
+    """Evaluate all eligible tails for every held-out query."""
+
+    known = set(all_known)
+    positive_set = set(positives)
+    queries = sorted({(head, relation) for head, relation, _ in positives})
+    candidate_scores: dict[Query, dict[str, float]] = {}
+    triples: list[Triple] = []
+    labels: list[int] = []
+    for query in queries:
+        head, relation = query
+        relevant = {
+            tail
+            for positive_head, positive_relation, tail in positive_set
+            if (positive_head, positive_relation) == query
+        }
+        eligible = [
+            tail
+            for tail in tail_candidates[query]
+            if tail in relevant or (head, relation, tail) not in known
+        ]
+        query_scores = {
+            tail: float(scorer((head, relation, tail)))
+            for tail in sorted(set(eligible))
+        }
+        candidate_scores[query] = query_scores
+        for tail in sorted(query_scores):
+            triples.append((head, relation, tail))
+            labels.append(int(tail in relevant))
+    scores = [
+        candidate_scores[(head, relation)][tail] for head, relation, tail in triples
+    ]
+    raw_ranks = filtered_ranks(candidate_scores, positives, set(), filtered=False)
+    filtered_values = filtered_ranks(
+        candidate_scores,
+        positives,
+        all_known,
+        filtered=True,
+    )
+    prevalence = sum(labels) / len(labels) if labels else math.nan
+    result: dict[str, object] = {
+        "protocol": "full_candidate_all_eligible_tails",
+        "label_semantics": {"1": "positive", "0": "unlabeled"},
+        "AUROC": auroc(labels, scores),
+        "AUPRC": auprc(labels, scores),
+        "candidate_prevalence": prevalence,
+        "candidate_count": len(labels),
+        "positive_count": sum(labels),
+        "unlabeled_count": len(labels) - sum(labels),
+        "candidate_prevalence_warning": (
+            "AUPRC is prevalence-dependent; do not compare it with sampled-set "
+            "AUPRC without accounting for candidate prevalence."
+        ),
+        "raw": _rank_metrics(raw_ranks, ks),
+        "filtered": {
+            **_rank_metrics(filtered_values, ks),
+            **_query_topk_metrics(
+                candidate_scores,
+                positives,
+                all_known=all_known,
+                ks=ks,
+            ),
+        },
+        "raw_ranks": raw_ranks.tolist(),
+        "filtered_ranks": filtered_values.tolist(),
+    }
+    if probability_scorer is not None:
+        probabilities = [float(probability_scorer(triple)) for triple in triples]
+        result["calibration"] = {
+            "Brier": brier_score(labels, probabilities),
+            "ECE": expected_calibration_error(labels, probabilities),
+        }
+    return result
+
+
+def evaluate_sampled_unlabeled(
+    scorer: TripleScorer,
+    positives: Sequence[Triple],
+    unlabeled: Sequence[Triple],
+    *,
+    strategy: str,
+    probability_scorer: TripleScorer | None = None,
+) -> dict[str, object]:
+    """Evaluate positives against an explicit sampled-unlabeled set."""
+
+    positive_unique = sorted(set(positives))
+    unlabeled_unique = sorted(set(unlabeled) - set(positive_unique))
+    triples = [*positive_unique, *unlabeled_unique]
+    labels = [1] * len(positive_unique) + [0] * len(unlabeled_unique)
+    scores = [float(scorer(triple)) for triple in triples]
+    prevalence = len(positive_unique) / len(triples) if triples else math.nan
+    result: dict[str, object] = {
+        "protocol": f"sampled_unlabeled_{strategy}",
+        "label_semantics": {"1": "positive", "0": "unlabeled"},
+        "AUROC": auroc(labels, scores),
+        "AUPRC": auprc(labels, scores),
+        "positive_count": len(positive_unique),
+        "unlabeled_count": len(unlabeled_unique),
+        "candidate_prevalence": prevalence,
+        "candidate_prevalence_warning": (
+            "AUPRC is specific to this sampled-unlabeled prevalence and is not "
+            "directly comparable with other candidate protocols."
+        ),
+    }
+    if probability_scorer is not None:
+        probabilities = [float(probability_scorer(triple)) for triple in triples]
+        result["calibration"] = {
+            "Brier": brier_score(labels, probabilities),
+            "ECE": expected_calibration_error(labels, probabilities),
+        }
+    return result
 
 
 def _rank_metrics(ranks: np.ndarray, ks: Sequence[int]) -> dict[str, float]:
     metrics = {f"Hits@{k}": hits_at_k(ranks, k) for k in ks}
     metrics["MRR"] = mrr(ranks)
     return metrics
+
+
+def _query_topk_metrics(
+    score_map: Mapping[Query, Mapping[str, float]],
+    positives: Sequence[Triple],
+    *,
+    all_known: Sequence[Triple] | set[Triple],
+    ks: Sequence[int],
+) -> dict[str, float]:
+    known = set(all_known)
+    positives_by_query: dict[Query, set[str]] = {}
+    for head, relation, tail in positives:
+        positives_by_query.setdefault((head, relation), set()).add(tail)
+    collected: dict[str, list[float]] = {
+        metric: []
+        for k in ks
+        for metric in (f"Precision@{k}", f"Recall@{k}", f"NDCG@{k}", f"EF@{k}")
+    }
+    for query, relevant in positives_by_query.items():
+        head, relation = query
+        candidates = {
+            tail: score
+            for tail, score in score_map[query].items()
+            if tail in relevant or (head, relation, tail) not in known
+        }
+        ranked = sorted(candidates, key=lambda tail: (-candidates[tail], tail))
+        prevalence = len(relevant) / len(ranked) if ranked else math.nan
+        for k in ks:
+            top = ranked[:k]
+            hits = sum(tail in relevant for tail in top)
+            denominator = min(k, len(ranked))
+            precision = hits / denominator if denominator else math.nan
+            recall = hits / len(relevant) if relevant else math.nan
+            dcg = sum(
+                1.0 / math.log2(index + 2)
+                for index, tail in enumerate(top)
+                if tail in relevant
+            )
+            ideal_hits = min(len(relevant), denominator)
+            ideal = sum(1.0 / math.log2(index + 2) for index in range(ideal_hits))
+            ndcg = dcg / ideal if ideal else math.nan
+            ef = (
+                precision / prevalence
+                if prevalence and not math.isnan(prevalence)
+                else math.nan
+            )
+            collected[f"Precision@{k}"].append(precision)
+            collected[f"Recall@{k}"].append(recall)
+            collected[f"NDCG@{k}"].append(ndcg)
+            collected[f"EF@{k}"].append(ef)
+    return {
+        metric: float(np.mean(values)) if values else math.nan
+        for metric, values in collected.items()
+    }
 
 
 def _candidate_scores(

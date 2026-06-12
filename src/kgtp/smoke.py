@@ -10,7 +10,7 @@ import torch
 from torch_geometric.data import HeteroData
 
 from kgtp.data.common import PathLike
-from kgtp.hetero.splits import leakage_free_random_link_split
+from kgtp.hetero.splits import disjoint_random_link_split
 from kgtp.models.train import TrainingConfig, train_one_seed
 
 
@@ -34,6 +34,7 @@ def tiny_heterodata() -> HeteroData:
     """Build a small heterogeneous KG with all production node/edge families."""
 
     data = HeteroData()
+    data.is_smoke_test_graph = True
     generator = torch.Generator().manual_seed(13)
     data["disease"].x = torch.eye(3)
     data["disease"].node_id = ["EFO_0004616", "EFO_0004617", "EFO_0004618"]
@@ -119,7 +120,7 @@ def run_smoke_train(
     """Train HGT briefly on the tiny graph and return filtered metrics."""
 
     data = tiny_heterodata()
-    bundle = leakage_free_random_link_split(
+    bundle = disjoint_random_link_split(
         data,
         seed=seed,
         num_val=0.2,
@@ -141,7 +142,6 @@ def run_smoke_train(
             num_layers=1,
             max_epochs=max_epochs,
             patience=max_epochs,
-            negatives_per_positive=4,
         ),
         output_dir=output_dir,
     )

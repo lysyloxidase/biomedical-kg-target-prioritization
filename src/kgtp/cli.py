@@ -8,17 +8,35 @@ import typer
 
 from kgtp.ablation.common import read_report
 from kgtp.ablation.tables import write_ablation_tables
+from kgtp.artifacts import (
+    ArtifactPaths,
+    ArtifactValidationError,
+    validate_and_load_artifacts,
+)
 from kgtp.config import load_settings, load_yaml
 from kgtp.data.build_graph import assert_canonical_edge_types
 from kgtp.data.common import read_table
 from kgtp.data.opentargets import fetch_oa_target_count
-from kgtp.explain.case_studies import PredictionCandidate, build_phase6_case_studies
-from kgtp.explain.explainer import DISEASE_GENE_EDGE, TargetExplainer
+from kgtp.explain.runner import run_validated_explanations
 from kgtp.hetero.build_heterodata import build_heterodata
-from kgtp.hetero.splits import leakage_free_random_link_split, load_splits, save_splits
+from kgtp.hetero.splits import disjoint_random_link_split, load_splits, save_splits
 from kgtp.kg.neo4j_loader import Neo4jConfig, load_graph
 from kgtp.kg.statistics import graph_statistics_table
-from kgtp.models.train import TrainingConfig, build_model, train_one_seed
+from kgtp.models.train import TrainingConfig, train_one_seed
+from kgtp.pipeline.sample import (
+    SamplePaths,
+    assemble_sample,
+    build_sample_features,
+    clean_sample,
+    evaluate_sample,
+    normalize_sample,
+    prepare_sample,
+    report_sample,
+    reproduce_small,
+    split_sample,
+    train_sample_baselines,
+    train_sample_gnn,
+)
 from kgtp.smoke import run_smoke_train
 
 app = typer.Typer(help="OA-centric heterogeneous KG benchmark utilities.")
@@ -40,7 +58,157 @@ MAX_EPOCHS_OPTION = typer.Option(50)
 ABLATION_REPORTS_DIR_OPTION = typer.Option(Path("reports/ablations"))
 ABLATION_TABLES_DIR_OPTION = typer.Option(Path("reports/ablation_tables"))
 EXPLAIN_OUTPUT_DIR_OPTION = typer.Option(Path("reports/figures"))
+EXPLAIN_CHECKPOINT_OPTION = typer.Option(..., help="Trained best-checkpoint artifact.")
+EXPLAIN_MODEL_CONFIG_OPTION = typer.Option(..., help="Saved model configuration JSON.")
+EXPLAIN_GRAPH_OPTION = typer.Option(..., help="Train-message PyG HeteroData artifact.")
+EXPLAIN_DATASET_MANIFEST_OPTION = typer.Option(..., help="Dataset manifest JSON.")
+EXPLAIN_GRAPH_MANIFEST_OPTION = typer.Option(..., help="Full reference graph manifest.")
+EXPLAIN_FEATURE_MANIFEST_OPTION = typer.Option(
+    ..., help="Train-fitted feature manifest."
+)
+EXPLAIN_NODE_INDEX_MAP_OPTION = typer.Option(..., help="Node-index map JSON.")
+EXPLAIN_SPLIT_METADATA_OPTION = typer.Option(..., help="Validated split metadata JSON.")
+EXPLAIN_VALIDATION_METRICS_OPTION = typer.Option(
+    ..., help="Saved validation metrics JSON."
+)
+EXPLAIN_RUN_MANIFEST_OPTION = typer.Option(..., help="Completed run manifest JSON.")
+EXPLAIN_VALIDATED_OUTPUT_OPTION = typer.Option(
+    Path("artifacts/sample/report/explanations"),
+    help="Explanation output directory.",
+)
 SMOKE_OUTPUT_DIR_OPTION = typer.Option(Path("reports/smoke_train"))
+SAMPLE_DIR_OPTION = typer.Option(Path("data/sample"))
+SAMPLE_ARTIFACT_ROOT_OPTION = typer.Option(Path("artifacts/sample"))
+SAMPLE_MAX_EPOCHS_OPTION = typer.Option(5, min=1)
+
+
+def _sample_paths(sample_dir: Path, artifact_root: Path) -> SamplePaths:
+    return SamplePaths(sample_dir=sample_dir, root=artifact_root)
+
+
+@app.command("prepare-sample")
+def prepare_sample_command(
+    sample_dir: Path = SAMPLE_DIR_OPTION,
+    artifact_root: Path = SAMPLE_ARTIFACT_ROOT_OPTION,
+) -> None:
+    """Validate the checked-in redistributable sample snapshot."""
+
+    prepare_sample(_sample_paths(sample_dir, artifact_root))
+
+
+@app.command("normalize")
+def normalize_command(
+    sample_dir: Path = SAMPLE_DIR_OPTION,
+    artifact_root: Path = SAMPLE_ARTIFACT_ROOT_OPTION,
+) -> None:
+    """Normalize the sample identifiers into deterministic Parquet tables."""
+
+    normalize_sample(_sample_paths(sample_dir, artifact_root))
+
+
+@app.command("assemble")
+def assemble_command(
+    sample_dir: Path = SAMPLE_DIR_OPTION,
+    artifact_root: Path = SAMPLE_ARTIFACT_ROOT_OPTION,
+) -> None:
+    """Assemble canonical graph tables from normalized sample data."""
+
+    assemble_sample(_sample_paths(sample_dir, artifact_root))
+
+
+@app.command("features")
+def features_command(
+    sample_dir: Path = SAMPLE_DIR_OPTION,
+    artifact_root: Path = SAMPLE_ARTIFACT_ROOT_OPTION,
+) -> None:
+    """Build the sample PyG HeteroData and feature tensors."""
+
+    build_sample_features(_sample_paths(sample_dir, artifact_root))
+
+
+@app.command("split")
+def split_command(
+    sample_dir: Path = SAMPLE_DIR_OPTION,
+    artifact_root: Path = SAMPLE_ARTIFACT_ROOT_OPTION,
+    seed: int = SEED_OPTION,
+) -> None:
+    """Create deterministic sample disease-gene link splits."""
+
+    split_sample(_sample_paths(sample_dir, artifact_root), seed=seed)
+
+
+@app.command("train-baselines")
+def train_baselines_command(
+    sample_dir: Path = SAMPLE_DIR_OPTION,
+    artifact_root: Path = SAMPLE_ARTIFACT_ROOT_OPTION,
+    seed: int = SEED_OPTION,
+) -> None:
+    """Fit the executable small-sample baseline models."""
+
+    train_sample_baselines(_sample_paths(sample_dir, artifact_root), seed=seed)
+
+
+@app.command("train-gnn")
+def train_gnn_command(
+    sample_dir: Path = SAMPLE_DIR_OPTION,
+    artifact_root: Path = SAMPLE_ARTIFACT_ROOT_OPTION,
+    seed: int = SEED_OPTION,
+    max_epochs: int = SAMPLE_MAX_EPOCHS_OPTION,
+) -> None:
+    """Train four GNN families across five fixed sample seeds."""
+
+    train_sample_gnn(
+        _sample_paths(sample_dir, artifact_root),
+        seed=seed,
+        max_epochs=max_epochs,
+    )
+
+
+@app.command("evaluate")
+def evaluate_command(
+    sample_dir: Path = SAMPLE_DIR_OPTION,
+    artifact_root: Path = SAMPLE_ARTIFACT_ROOT_OPTION,
+    seed: int = SEED_OPTION,
+) -> None:
+    """Verify reloaded baseline and multi-seed GNN results."""
+
+    evaluate_sample(_sample_paths(sample_dir, artifact_root), seed=seed)
+
+
+@app.command("report")
+def report_command(
+    sample_dir: Path = SAMPLE_DIR_OPTION,
+    artifact_root: Path = SAMPLE_ARTIFACT_ROOT_OPTION,
+) -> None:
+    """Write machine-readable and Markdown sample reports."""
+
+    report_sample(_sample_paths(sample_dir, artifact_root))
+
+
+@app.command("reproduce-small")
+def reproduce_small_command(
+    sample_dir: Path = SAMPLE_DIR_OPTION,
+    artifact_root: Path = SAMPLE_ARTIFACT_ROOT_OPTION,
+    seed: int = SEED_OPTION,
+    max_epochs: int = SAMPLE_MAX_EPOCHS_OPTION,
+) -> None:
+    """Run the complete checked-in sample pipeline."""
+
+    reproduce_small(
+        _sample_paths(sample_dir, artifact_root),
+        seed=seed,
+        max_epochs=max_epochs,
+    )
+
+
+@app.command("clean-sample")
+def clean_sample_command(
+    sample_dir: Path = SAMPLE_DIR_OPTION,
+    artifact_root: Path = SAMPLE_ARTIFACT_ROOT_OPTION,
+) -> None:
+    """Remove generated sample artifacts only."""
+
+    clean_sample(_sample_paths(sample_dir, artifact_root))
 
 
 @app.command()
@@ -105,7 +273,7 @@ def neo4j(
         Neo4jConfig(
             uri=settings.neo4j.uri,
             user=settings.neo4j.user,
-            password=settings.neo4j.password,
+            password=settings.neo4j.require_password(),
             database=settings.neo4j.database,
         ),
     )
@@ -138,30 +306,37 @@ def splits(
     output_dir: Path = SPLITS_DIR_OPTION,
     seed: int = SEED_OPTION,
 ) -> None:
-    """Create and persist leakage-free link-prediction splits."""
+    """Create and persist disjoint link-prediction supervision splits."""
 
     import torch
 
     data = torch.load(heterodata_path, weights_only=False)
-    bundle = leakage_free_random_link_split(data, seed=seed)
+    bundle = disjoint_random_link_split(data, seed=seed)
     save_splits(bundle, output_dir)
-    typer.echo(f"Saved leakage-free splits to {output_dir}.")
+    typer.echo(f"Saved disjoint supervision splits to {output_dir}.")
 
 
 @app.command()
 def baselines() -> None:
-    """List Phase 3 non-graph baselines and result output convention."""
+    """List executable baseline outputs; use train-baselines to run them."""
 
     for name in (
-        "popularity",
+        "random",
+        "degree_popularity",
+        "source_score_only",
         "logistic_regression",
+        "gradient_boosted_trees",
         "matrix_factorization",
-        "text_embeddings",
+        "adjacency_svd",
         "node2vec",
-        "centrality",
-        "kge",
+        "transe",
+        "distmult",
+        "complex",
+        "rotate",
+        "hash_text",
+        "feature_mlp",
     ):
-        typer.echo(f"- {name}: reports/results_{name}.json")
+        typer.echo(f"- {name}: artifacts/sample/metrics/baselines/{name}.json")
 
 
 @app.command()
@@ -173,7 +348,7 @@ def train(
     seed: int = SEED_OPTION,
     max_epochs: int = MAX_EPOCHS_OPTION,
 ) -> None:
-    """Train a Phase 4 GNN model on leakage-free split artifacts."""
+    """Train a Phase 4 GNN model on disjoint split artifacts."""
 
     import torch
 
@@ -235,51 +410,41 @@ def ablate(
 
 @app.command()
 def explain(
-    heterodata_path: Path = HETERODATA_PATH_OPTION,
-    output_dir: Path = EXPLAIN_OUTPUT_DIR_OPTION,
+    checkpoint: Path = EXPLAIN_CHECKPOINT_OPTION,
+    model_config: Path = EXPLAIN_MODEL_CONFIG_OPTION,
+    graph: Path = EXPLAIN_GRAPH_OPTION,
+    dataset_manifest: Path = EXPLAIN_DATASET_MANIFEST_OPTION,
+    graph_manifest: Path = EXPLAIN_GRAPH_MANIFEST_OPTION,
+    feature_manifest: Path = EXPLAIN_FEATURE_MANIFEST_OPTION,
+    node_index_map: Path = EXPLAIN_NODE_INDEX_MAP_OPTION,
+    split_metadata: Path = EXPLAIN_SPLIT_METADATA_OPTION,
+    validation_metrics: Path = EXPLAIN_VALIDATION_METRICS_OPTION,
+    run_manifest: Path = EXPLAIN_RUN_MANIFEST_OPTION,
+    output_dir: Path = EXPLAIN_VALIDATED_OUTPUT_OPTION,
 ) -> None:
-    """Build Phase 6 interpretability case-study figures from HeteroData."""
+    """Explain predictions only from compatible, validated trained artifacts."""
 
-    import torch
-
-    if not heterodata_path.exists():
-        typer.echo(f"No HeteroData artifact found at {heterodata_path}.")
-        raise typer.Exit(code=0)
-    data = torch.load(heterodata_path, weights_only=False)
-    model = build_model(
-        data.metadata(),
-        TrainingConfig(
-            model_name="hgt",
-            hidden_channels=16,
-            num_heads=4,
-            num_layers=1,
-            edge_types=(DISEASE_GENE_EDGE,),
-            negatives_per_positive=16,
-        ),
+    paths = ArtifactPaths(
+        checkpoint=checkpoint,
+        model_config=model_config,
+        graph=graph,
+        dataset_manifest=dataset_manifest,
+        graph_manifest=graph_manifest,
+        feature_manifest=feature_manifest,
+        node_index_map=node_index_map,
+        split_metadata=split_metadata,
+        validation_metrics=validation_metrics,
+        run_manifest=run_manifest,
     )
-    gene_count = int(data["gene"].num_nodes)
-    predictions = [
-        PredictionCandidate(0, gene_idx, float(gene_count - gene_idx))
-        for gene_idx in range(gene_count)
-    ]
-    train_positive_pairs: set[tuple[int, int]] = set()
-    if DISEASE_GENE_EDGE in data.edge_types:
-        for source, target in data[DISEASE_GENE_EDGE].edge_index.t().tolist():
-            train_positive_pairs.add((int(source), int(target)))
-    explainer = TargetExplainer(
-        model,
-        data,
-        edge_type=DISEASE_GENE_EDGE,
-        integration_steps=8,
+    try:
+        artifacts = validate_and_load_artifacts(paths)
+        result = run_validated_explanations(artifacts, output_dir)
+    except (ArtifactValidationError, OSError, RuntimeError, ValueError) as exc:
+        typer.echo(f"Explanation refused: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(
+        f"Wrote {result['explanation_count']} validated explanations to {output_dir}."
     )
-    results = build_phase6_case_studies(
-        explainer,
-        data,
-        predictions,
-        train_positive_pairs,
-        output_dir=output_dir,
-    )
-    typer.echo(f"Wrote {len(results)} explanation case studies to {output_dir}.")
 
 
 @app.command("smoke-train")

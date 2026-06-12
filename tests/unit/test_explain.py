@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
 
+import pytest
 import torch
 from torch_geometric.data import HeteroData
 from torch_geometric.explain import HeteroExplanation
@@ -19,6 +20,32 @@ from kgtp.explain.explainer import DISEASE_GENE_EDGE, TargetExplainer
 from kgtp.explain.metapaths import rank_metapaths
 from kgtp.models.hgt import HGTEncoder
 from kgtp.models.multitask import MultiTaskLinkPredictor
+
+
+class _LinearGeneLinkModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(2))
+        self.bias = torch.nn.Parameter(torch.zeros(()))
+        self.is_trained = False
+
+    def encode(
+        self,
+        x_dict: dict[str, torch.Tensor],
+        edge_index_dict: dict[tuple[str, str, str], torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        del edge_index_dict
+        return x_dict
+
+    def decode(
+        self,
+        z_dict: dict[str, torch.Tensor],
+        edge_type: tuple[str, str, str],
+        edge_label_index: torch.Tensor,
+    ) -> torch.Tensor:
+        del edge_type
+        genes = z_dict["gene"][edge_label_index[1]]
+        return genes @ self.weight + self.bias
 
 
 def _toy_explain_data() -> HeteroData:
@@ -72,11 +99,13 @@ def _toy_explain_data() -> HeteroData:
 
 def _toy_model(data: HeteroData) -> MultiTaskLinkPredictor:
     torch.manual_seed(7)
-    return MultiTaskLinkPredictor(
+    model = MultiTaskLinkPredictor(
         HGTEncoder(8, 2, 1, data.metadata()),
         hidden_channels=8,
         edge_types=(DISEASE_GENE_EDGE,),
     )
+    model.is_trained = True
+    return model
 
 
 def test_captum_target_explainer_returns_hetero_explanation() -> None:
@@ -107,7 +136,9 @@ def test_attention_explainer_extracts_hgt_attention_per_prediction() -> None:
     data = _toy_explain_data()
     attention = extract_hgt_attention_weights(_toy_model(data), data, 0, 2, top_k=6)
 
-    assert attention["algorithm"] == "AttentionExplainer"
+    assert attention["algorithm"] == "endpoint_conditioned_topology_proxy"
+    assert attention["model_attribution"] is False
+    assert attention["attention_available"] is False
     assert attention["weights"]
     summary = cast(Mapping[str, float], attention["meta_relation_summary"])
     weights = cast(list[Mapping[str, object]], attention["weights"])
@@ -174,3 +205,141 @@ def test_case_studies_write_known_and_novel_hypothesis_figures(tmp_path: Path) -
     for result in results:
         assert Path(result.figure_paths["png"]).exists()
         assert Path(result.figure_paths["pdf"]).exists()
+
+
+def test_untrained_model_cannot_produce_explanations() -> None:
+    data = _toy_explain_data()
+    model = _toy_model(data)
+    model.is_trained = False
+
+    explainer = TargetExplainer(model, data, use_pyg_captum=False)
+
+    with pytest.raises(RuntimeError, match="trained model"):
+        explainer.explain_link(0, 2)
+
+
+def test_parameter_randomization_changes_model_attributions() -> None:
+    data = _toy_explain_data()
+    model = _toy_model(data)
+    explainer = TargetExplainer(
+        model,
+        data,
+        integration_steps=2,
+        use_pyg_captum=False,
+    )
+    before = explainer.explain_link(0, 2)["gene"].feature_mask.clone()
+
+    torch.manual_seed(91)
+    for parameter in model.parameters():
+        parameter.data.normal_()
+    after = explainer.explain_link(0, 2)["gene"].feature_mask
+
+    assert not torch.allclose(before, after)
+
+
+def test_removing_highly_attributed_edge_changes_prediction_score() -> None:
+    data = _toy_explain_data()
+    explainer = TargetExplainer(
+        _toy_model(data),
+        data,
+        integration_steps=1,
+        use_pyg_captum=False,
+    )
+    explanation = explainer.explain_link(0, 2)
+    best: tuple[tuple[str, str, str], int, float] | None = None
+    for edge_type in explanation.edge_types:
+        mask = explanation[edge_type].edge_mask
+        if mask.numel() == 0:
+            continue
+        position = int(mask.argmax().item())
+        value = float(mask[position].item())
+        if best is None or value > best[2]:
+            best = (cast(tuple[str, str, str], edge_type), position, value)
+
+    assert best is not None
+    assert best[2] > 0
+    baseline = explainer.score_link(0, 2)
+    perturbed = explainer.score_without_edges(0, 2, {best[0]: [best[1]]})
+    assert perturbed != pytest.approx(baseline)
+
+
+def test_held_out_candidate_edge_is_absent_from_explanation_message_graph() -> None:
+    data = _toy_explain_data()
+    explainer = TargetExplainer(
+        _toy_model(data),
+        data,
+        integration_steps=1,
+        use_pyg_captum=False,
+    )
+
+    explanation = explainer.explain_link(0, 2)
+    message_pairs = {
+        tuple(pair) for pair in explanation[DISEASE_GENE_EDGE].edge_index.t().tolist()
+    }
+    reverse_pairs = {
+        tuple(pair)
+        for pair in explanation[("gene", "rev_associated_with", "disease")]
+        .edge_index.t()
+        .tolist()
+    }
+
+    assert (0, 2) not in message_pairs
+    assert (2, 0) not in reverse_pairs
+
+
+def test_label_randomization_reduces_controlled_attribution_signal() -> None:
+    data = HeteroData()
+    data["disease"].x = torch.ones(1, 1)
+    data["disease"].node_id = ["EFO_CONTROL"]
+    data["gene"].x = torch.tensor(
+        [
+            [2.0, 0.2],
+            [1.6, 0.3],
+            [0.3, 1.6],
+            [0.2, 2.0],
+            [1.2, 0.8],
+            [0.8, 1.2],
+        ]
+    )
+    data["gene"].node_id = [f"GENE_{index}" for index in range(6)]
+    data[DISEASE_GENE_EDGE].edge_index = torch.empty((2, 0), dtype=torch.long)
+    clean_labels = torch.tensor([1.0, 1.0, 0.0, 0.0, 1.0, 0.0])
+    randomized_labels = torch.tensor([1.0, 0.0, 1.0, 0.0, 0.0, 1.0])
+
+    clean_model = _fit_linear_control(data["gene"].x, clean_labels)
+    randomized_model = _fit_linear_control(data["gene"].x, randomized_labels)
+    clean_explanation = TargetExplainer(
+        clean_model,
+        data,
+        integration_steps=8,
+        use_pyg_captum=False,
+    ).explain_link(0, 0)
+    randomized_explanation = TargetExplainer(
+        randomized_model,
+        data,
+        integration_steps=8,
+        use_pyg_captum=False,
+    ).explain_link(0, 0)
+
+    clean_signal = clean_explanation["gene"].raw_feature_attribution.abs().sum()
+    randomized_signal = (
+        randomized_explanation["gene"].raw_feature_attribution.abs().sum()
+    )
+    assert clean_signal > randomized_signal * 20
+
+
+def _fit_linear_control(
+    features: torch.Tensor,
+    labels: torch.Tensor,
+) -> _LinearGeneLinkModel:
+    torch.manual_seed(3)
+    model = _LinearGeneLinkModel()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.05)
+    for _ in range(300):
+        optimizer.zero_grad()
+        logits = features @ model.weight + model.bias
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels)
+        loss.backward()
+        optimizer.step()
+    model.is_trained = True
+    return model

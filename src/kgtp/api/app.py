@@ -14,13 +14,24 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from torch_geometric.data import HeteroData
 
+from kgtp import __version__
+from kgtp.artifacts import (
+    ArtifactPaths,
+    ArtifactValidationError,
+    default_sample_artifact_paths,
+    validate_and_load_artifacts,
+)
 from kgtp.explain.explainer import DISEASE_GENE_EDGE, TargetExplainer
-from kgtp.models.train import TrainingConfig, build_model
+from kgtp.hetero.splits import disjoint_random_link_split
+from kgtp.models.train import TrainingConfig, train_one_seed
 from kgtp.smoke import tiny_heterodata
 
 EdgeType = tuple[str, str, str]
 
-app = FastAPI(title="biomedical-kg-target-prioritization", version="1.0")
+app = FastAPI(
+    title="biomedical-kg-target-prioritization",
+    version=__version__,
+)
 
 
 @dataclass
@@ -32,7 +43,8 @@ class PredictionService:
     explainer: TargetExplainer
     artifact_source: str
     model_source: str
-    model_warning: str | None = None
+    metadata: dict[str, Any]
+    demo_mode: bool = False
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -46,12 +58,14 @@ async def project_dashboard() -> HTMLResponse:
 async def health() -> dict[str, object]:
     """Return API health and artifact-loading status."""
 
-    service = get_service()
+    service = _service_or_503()
     return {
         "status": "ok",
         "artifact_source": service.artifact_source,
         "model_source": service.model_source,
-        "model_warning": service.model_warning,
+        "demo_mode": service.demo_mode,
+        "trained": service.metadata["trained"],
+        "warnings": service.metadata["warnings"],
         "disclaimer": "Computational hypothesis generation only; not validated target discovery or clinical advice.",
     }
 
@@ -60,7 +74,7 @@ async def health() -> dict[str, object]:
 async def graph_stats() -> dict[str, object]:
     """Return graph-statistics table derived from the loaded ``HeteroData``."""
 
-    service = get_service()
+    service = _service_or_503()
     stats = graph_stats_from_heterodata(service.data)
     return stats
 
@@ -69,7 +83,7 @@ async def graph_stats() -> dict[str, object]:
 async def graph_data() -> dict[str, object]:
     """Return browser-ready graph nodes and edges."""
 
-    service = get_service()
+    service = _service_or_503()
     return graph_data_from_heterodata(service.data)
 
 
@@ -80,13 +94,14 @@ async def predict(
 ) -> dict[str, object]:
     """Rank candidate target genes and attach compact explanation subgraphs."""
 
-    service = get_service()
+    service = _service_or_503()
     disease_idx = _find_node_index(service.data, "disease", disease)
     if disease_idx is None:
         raise HTTPException(status_code=404, detail=f"Disease not found: {disease}")
 
     ranked = rank_targets(service, disease_idx, top_k=top_k)
     return {
+        **service.metadata,
         "disease": disease,
         "primary_metric": "AUPRC",
         "caveat": "Ranked genes are computational hypotheses and require independent validation.",
@@ -96,65 +111,140 @@ async def predict(
 
 @lru_cache(maxsize=1)
 def get_service() -> PredictionService:
-    """Load artifacts once, falling back to a deterministic tiny graph."""
+    """Load validated production artifacts or an explicitly requested demo."""
 
-    torch.manual_seed(13)
-    heterodata_path = Path(
-        os.environ.get(
-            "KGTP_HETERODATA_PATH", "data/processed/heterodata/heterodata.pt"
-        )
-    )
-    model_path = Path(
-        os.environ.get("KGTP_MODEL_PATH", "reports/models/hgt_seed13/model.pt")
-    )
-    hidden_channels = int(os.environ.get("KGTP_HIDDEN_CHANNELS", "16"))
-    num_heads = int(os.environ.get("KGTP_NUM_HEADS", "4"))
-    num_layers = int(os.environ.get("KGTP_NUM_LAYERS", "1"))
+    if os.environ.get("KGTP_DEMO_MODE", "").lower() == "true":
+        return _build_demo_service()
 
-    if heterodata_path.exists():
-        data = cast(HeteroData, torch.load(heterodata_path, weights_only=False))
-        artifact_source = str(heterodata_path)
-    else:
-        data = tiny_heterodata()
-        artifact_source = "tiny-smoke-graph"
-
-    model = build_model(
-        data.metadata(),
-        TrainingConfig(
-            model_name="hgt",
-            hidden_channels=hidden_channels,
-            num_heads=num_heads,
-            num_layers=num_layers,
-            edge_types=(DISEASE_GENE_EDGE,),
-            negatives_per_positive=16,
+    defaults = default_sample_artifact_paths()
+    paths = ArtifactPaths(
+        checkpoint=_env_path("KGTP_CHECKPOINT_PATH", defaults.checkpoint),
+        model_config=_env_path("KGTP_MODEL_CONFIG_PATH", defaults.model_config),
+        graph=_env_path("KGTP_GRAPH_PATH", defaults.graph),
+        dataset_manifest=_env_path(
+            "KGTP_DATASET_MANIFEST_PATH", defaults.dataset_manifest
         ),
+        graph_manifest=_env_path("KGTP_GRAPH_MANIFEST_PATH", defaults.graph_manifest),
+        feature_manifest=_env_path(
+            "KGTP_FEATURE_MANIFEST_PATH", defaults.feature_manifest
+        ),
+        node_index_map=_env_path("KGTP_NODE_INDEX_MAP_PATH", defaults.node_index_map),
+        split_metadata=_env_path("KGTP_SPLIT_METADATA_PATH", defaults.split_metadata),
+        validation_metrics=_env_path(
+            "KGTP_VALIDATION_METRICS_PATH", defaults.validation_metrics
+        ),
+        run_manifest=_env_path("KGTP_RUN_MANIFEST_PATH", defaults.run_manifest),
     )
-    _initialize_lazy_modules(model, data)
-    model_source = "untrained-smoke-model"
-    model_warning: str | None = None
-    if model_path.exists():
-        try:
-            state = torch.load(model_path, weights_only=False, map_location="cpu")
-            model.load_state_dict(state)
-            model_source = str(model_path)
-        except Exception as exc:
-            model_warning = f"Could not load model state from {model_path}: {type(exc).__name__}: {exc}"
+    artifacts = validate_and_load_artifacts(paths)
+    metadata = {
+        "model_name": artifacts.model_config["model_name"],
+        "model_version": artifacts.model_config["model_version"],
+        "run_id": artifacts.run_manifest["run_id"],
+        "checkpoint_sha256": artifacts.checkpoint_sha256,
+        "dataset_id": artifacts.dataset_manifest["dataset_id"],
+        "dataset_manifest_sha256": artifacts.dataset_manifest_sha256,
+        "split_id": artifacts.artifact_metadata["split_hash"],
+        "trained": True,
+        "validation_metrics": artifacts.validation_metrics["metrics"],
+        "candidate_protocol": "full_candidate_all_eligible_genes",
+        "hypothesis_only": True,
+        "warnings": [
+            "Computational hypotheses from a small sample dataset; not clinical advice.",
+            "Integrated Gradients and edge occlusion are model attributions, not causal explanations.",
+        ],
+    }
+    return PredictionService(
+        data=artifacts.data,
+        model=artifacts.model,
+        explainer=TargetExplainer(
+            artifacts.model,
+            artifacts.data,
+            edge_type=DISEASE_GENE_EDGE,
+            integration_steps=2,
+            use_pyg_captum=False,
+        ),
+        artifact_source=str(paths.graph),
+        model_source=str(paths.checkpoint),
+        metadata=metadata,
+    )
 
-    explainer = TargetExplainer(
-        model,
-        data,
-        edge_type=DISEASE_GENE_EDGE,
-        integration_steps=1,
-        use_pyg_captum=False,
+
+def _service_or_503() -> PredictionService:
+    try:
+        return get_service()
+    except (ArtifactValidationError, OSError, RuntimeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Prediction service unavailable: {exc}",
+        ) from exc
+
+
+def _build_demo_service() -> PredictionService:
+    torch.manual_seed(13)
+    reference = tiny_heterodata()
+    bundle = disjoint_random_link_split(
+        reference,
+        seed=13,
+        num_val=0.2,
+        num_test=0.2,
+        disjoint_train_ratio=0.5,
+        train_neg_sampling_ratio=1.0,
+        eval_neg_sampling_ratio=1.0,
     )
+    config = TrainingConfig(
+        model_name="hgt",
+        hidden_channels=8,
+        num_heads=2,
+        num_layers=1,
+        max_epochs=1,
+        patience=1,
+    )
+    result = train_one_seed(
+        bundle.train_data,
+        bundle.val_data,
+        bundle.test_data,
+        reference,
+        seed=13,
+        config=config,
+    )
+    result.model.is_trained = True
+    data = bundle.train_data
+    metadata = {
+        "model_name": "hgt-demo",
+        "model_version": "demo-1",
+        "run_id": "demo-in-memory",
+        "checkpoint_sha256": "demo-in-memory-no-checkpoint",
+        "dataset_id": "synthetic-smoke-demo",
+        "dataset_manifest_sha256": "demo-in-memory-no-manifest",
+        "split_id": "demo-seed-13",
+        "trained": True,
+        "validation_metrics": result.metrics,
+        "candidate_protocol": "demo_full_candidate_synthetic_graph",
+        "hypothesis_only": True,
+        "warnings": [
+            "DEMO MODE: synthetic smoke-test data; response is non-scientific.",
+            "Do not use demo scores for biomedical interpretation.",
+        ],
+    }
     return PredictionService(
         data=data,
-        model=model,
-        explainer=explainer,
-        artifact_source=artifact_source,
-        model_source=model_source,
-        model_warning=model_warning,
+        model=result.model,
+        explainer=TargetExplainer(
+            result.model,
+            data,
+            edge_type=DISEASE_GENE_EDGE,
+            integration_steps=1,
+            use_pyg_captum=False,
+        ),
+        artifact_source="synthetic-smoke-demo",
+        model_source="one-epoch-in-memory-demo",
+        metadata=metadata,
+        demo_mode=True,
     )
+
+
+def _env_path(name: str, default: Path) -> Path:
+    return Path(os.environ.get(name, str(default)))
 
 
 def rank_targets(

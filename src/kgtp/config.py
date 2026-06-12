@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,8 +24,15 @@ class Neo4jSettings(BaseModel):
 
     uri: str = "bolt://localhost:7687"
     user: str = "neo4j"
-    password: str = "password"
+    password: SecretStr | None = None
     database: str = "neo4j"
+
+    def require_password(self) -> str:
+        """Return the configured password or fail before opening a connection."""
+        if self.password is None or not self.password.get_secret_value():
+            msg = "KGTP_NEO4J__PASSWORD must be set for Neo4j operations"
+            raise ValueError(msg)
+        return self.password.get_secret_value()
 
 
 class GraphSettings(BaseModel):

@@ -1,4 +1,4 @@
-"""Leakage-free disjoint link-prediction splits for PyG ``HeteroData``."""
+"""Disjoint link-prediction supervision splits for PyG ``HeteroData``."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ class SplitBundle:
     metadata: dict[str, Any]
 
 
-def leakage_free_random_link_split(
+def disjoint_random_link_split(
     data: HeteroData,
     *,
     seed: int = 13,
@@ -57,7 +57,7 @@ def leakage_free_random_link_split(
     train_neg_sampling_ratio: float = 1.0,
     eval_neg_sampling_ratio: float = 10.0,
 ) -> SplitBundle:
-    """Create leakage-free splits with supervision edges disjoint from message edges."""
+    """Create supervision splits disjoint from message-passing target edges."""
 
     if len(edge_types) != len(rev_edge_types):
         msg = "edge_types and rev_edge_types must have the same length"
@@ -128,7 +128,12 @@ def leakage_free_random_link_split(
     return SplitBundle(train_data, val_data, test_data, metadata)
 
 
-def save_splits(bundle: SplitBundle, output_dir: PathLike) -> None:
+def save_splits(
+    bundle: SplitBundle,
+    output_dir: PathLike,
+    *,
+    write_metadata: bool = True,
+) -> None:
     """Save split tensors and JSON metadata to disk."""
 
     import torch
@@ -144,10 +149,11 @@ def save_splits(bundle: SplitBundle, output_dir: PathLike) -> None:
         },
         output / "splits.pt",
     )
-    (output / "split_metadata.json").write_text(
-        json.dumps(bundle.metadata, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    if write_metadata:
+        (output / "split_metadata.json").write_text(
+            json.dumps(bundle.metadata, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
 
 
 def load_splits(input_dir: PathLike) -> SplitBundle:
@@ -273,18 +279,21 @@ def _negative_edges_for_split(
         allowed_sources = sorted({int(value) for value in positive_edges[0].tolist()})
         allowed_targets = sorted({int(value) for value in positive_edges[1].tolist()})
 
-    negatives = sample_negative_edges(
-        num_src_nodes=int(data[source_type].num_nodes),
-        num_dst_nodes=int(data[target_type].num_nodes),
-        positive_edge_index=full_positive_edges,
-        num_samples=negative_count,
-        seed=seed,
-        strategy=strategy,
-        used_edges=used_edges,
-        allowed_src_nodes=allowed_sources,
-        allowed_dst_nodes=allowed_targets,
-    )
-    if negatives.size(1) < negative_count and restrict_to_positive_nodes:
+    try:
+        negatives = sample_negative_edges(
+            num_src_nodes=int(data[source_type].num_nodes),
+            num_dst_nodes=int(data[target_type].num_nodes),
+            positive_edge_index=full_positive_edges,
+            num_samples=negative_count,
+            seed=seed,
+            strategy=strategy,
+            used_edges=used_edges,
+            allowed_src_nodes=allowed_sources,
+            allowed_dst_nodes=allowed_targets,
+        )
+    except ValueError:
+        if not restrict_to_positive_nodes:
+            raise
         negatives = sample_negative_edges(
             num_src_nodes=int(data[source_type].num_nodes),
             num_dst_nodes=int(data[target_type].num_nodes),

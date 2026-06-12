@@ -18,7 +18,7 @@ sources:
   reactome:
     version: "v90"
     access: "contentservice + Ensembl2Reactome bulk"
-    license: "CC-BY-4.0"
+    license: "CC0-1.0 for annotation and derived interaction data"
   chembl:
     version: "35"
     license: "CC-BY-SA-3.0"
