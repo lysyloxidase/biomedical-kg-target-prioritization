@@ -2,38 +2,116 @@ name: CI
 
 on: [push, pull_request]
 
+permissions:
+  contents: read
+
+env:
+  UV_FROZEN: "1"
+
 jobs:
-  lint-type-test:
+  quality:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
-      - name: Sync locked environment
-        run: uv sync --frozen --extra dev --no-editable
-      - name: Lint and format
-        run: uv run --no-editable ruff check . && uv run --no-editable ruff format --check .
-      - name: Typecheck
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - run: uv sync --frozen --extra dev --no-editable
+      - name: Ruff lint
+        run: uv run --no-editable ruff check .
+      - name: Ruff format check
+        run: uv run --no-editable ruff format --check .
+      - name: Mypy
+        run: uv run --no-editable mypy src
+      - name: Pyright
+        run: uv run --no-editable pyright src tests
+
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - run: uv sync --frozen --extra dev --no-editable
+      - run: uv run --no-editable pytest tests/unit -q
+
+  sample-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - run: uv sync --frozen --extra dev --no-editable
+      - name: Complete sample pipeline
+        run: uv run --no-editable pytest tests/integration/test_sample_pipeline.py -q
+
+  scientific-invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - run: uv sync --frozen --extra dev --no-editable
+      - name: Leakage tests
+        run: uv run --no-editable pytest tests/unit/test_leakage_prevention.py tests/unit/test_splits.py -q
+      - name: Determinism tests
+        run: uv run --no-editable pytest tests/unit tests/integration -q -k "deterministic or same_seed or different_seed"
+      - name: Unlabeled-sampling tests
+        run: uv run --no-editable pytest tests/unit/test_unlabeled_sampling.py -q
+
+  api-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - run: uv sync --frozen --extra dev --no-editable
+      - run: uv run --no-editable pytest tests/integration/test_api_safety.py -q
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - run: uv sync --frozen --extra dev --no-editable
+      - name: Branch coverage and risk-based module gates
         run: |
-          uv run --no-editable mypy src
-          uv run --no-editable pyright src tests
-      - name: Tests
-        run: uv run --no-editable pytest --cov=kgtp --cov-report=term-missing --cov-fail-under=85
-      - name: Split-leakage tests
-        run: uv run --no-editable pytest tests/unit/test_splits.py -v
+          uv run --no-editable pytest --cov=kgtp --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=80
+          uv run --no-editable python scripts/check_coverage.py coverage.json
 
   smoke-train:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
-      - name: Sync locked environment
-        run: uv sync --frozen --extra dev --no-editable
-      - name: Smoke-train HGT on a tiny synthetic subgraph
-        run: uv run --no-editable python -m kgtp.cli smoke-train --tiny
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - run: uv sync --frozen --extra dev --no-editable
+      - run: uv run --no-editable python -m kgtp.cli smoke-train --tiny
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - run: uv sync --frozen --extra dev --no-editable
+      - name: Dependency vulnerability audit
+        run: uv run --no-editable pip-audit --ignore-vuln CVE-2025-3000
+      - name: Static security scan
+        run: uv run --no-editable bandit -q -r src -lll
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - run: uv sync --frozen --extra dev --no-editable
+      - run: uv run --no-editable mkdocs build --strict
+
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
 
   docker-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Build Docker image
-        run: docker build -f docker/Dockerfile -t kgtp:ci .
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - run: docker build -f docker/Dockerfile -t kgtp:ci .

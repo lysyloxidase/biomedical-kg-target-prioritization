@@ -6,7 +6,7 @@ import pytest
 import torch
 from torch_geometric.data import HeteroData
 
-from kgtp.hetero.splits import leakage_free_random_link_split
+from kgtp.hetero.splits import disjoint_random_link_split
 from kgtp.models.decoder import (
     DistMultDecoder,
     DotProductDecoder,
@@ -22,7 +22,9 @@ from kgtp.models.train import (
     TrainingConfig,
     build_model,
     evaluate_split,
+    evaluate_split_detailed,
     hgt_beats_popularity_floor,
+    load_training_checkpoint,
     train_multiseed,
     train_one_seed,
 )
@@ -70,7 +72,7 @@ def _toy_heterodata() -> HeteroData:
 
 def _split_bundle():
     data = _toy_heterodata()
-    bundle = leakage_free_random_link_split(
+    bundle = disjoint_random_link_split(
         data,
         seed=13,
         num_val=0.2,
@@ -166,7 +168,6 @@ def test_hgt_training_loss_decreases_and_evaluates_with_filtered_protocol(
         num_layers=1,
         max_epochs=6,
         patience=6,
-        negatives_per_positive=4,
     )
     result = train_one_seed(
         bundle.train_data,
@@ -177,18 +178,25 @@ def test_hgt_training_loss_decreases_and_evaluates_with_filtered_protocol(
         config=config,
         output_dir=tmp_path,
     )
-    losses = [row["loss"] for row in result.history]
+    losses = [row["total_loss"] for row in result.history]
     metrics = evaluate_split(
         result.model,
         bundle.test_data,
         reference,
-        negatives_per_positive=4,
         seed=13,
     )
 
     assert min(losses) <= losses[0]
     assert {"AUROC", "AUPRC", "filtered_MRR", "filtered_Hits@10"}.issubset(metrics)
+    first = result.history[0]
+    expected_total = (
+        first["loss_disease__associated_with__gene"]
+        + 0.25 * first["loss_drug__targets__gene"]
+        + 0.25 * first["loss_gene__participates_in__pathway"]
+    )
+    assert first["total_loss"] == pytest.approx(expected_total)
     assert (tmp_path / "model.pt").exists()
+    assert (tmp_path / "best_checkpoint.pt").exists()
     assert (tmp_path / "metrics.json").exists()
 
 
@@ -207,7 +215,6 @@ def test_ablation_models_train_and_multiseed_summary_is_written(tmp_path: Path) 
                 num_layers=1,
                 max_epochs=2,
                 patience=2,
-                negatives_per_positive=4,
             ),
         )
         assert "AUPRC" in result.metrics
@@ -223,7 +230,6 @@ def test_ablation_models_train_and_multiseed_summary_is_written(tmp_path: Path) 
             num_layers=1,
             max_epochs=1,
             patience=1,
-            negatives_per_positive=4,
         ),
         seeds=(1, 2, 3, 4, 5),
         output_dir=tmp_path,
@@ -244,3 +250,66 @@ def test_model_factory_and_popularity_floor_gate() -> None:
 
     assert isinstance(model, MultiTaskLinkPredictor)
     assert hgt_beats_popularity_floor({"AUPRC": 0.42}, {"AUPRC": 0.2})
+
+
+def test_untrained_model_evaluation_is_rejected() -> None:
+    reference, bundle = _split_bundle()
+    model = build_model(
+        bundle.train_data.metadata(),
+        TrainingConfig(
+            model_name="hgt",
+            hidden_channels=8,
+            num_heads=2,
+            num_layers=1,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="untrained"):
+        evaluate_split_detailed(model, bundle.test_data, reference)
+
+
+def test_checkpoint_reload_reproduces_metrics_and_rejects_hash_mismatch(
+    tmp_path: Path,
+) -> None:
+    reference, bundle = _split_bundle()
+    config = TrainingConfig(
+        model_name="rgcn",
+        hidden_channels=8,
+        num_layers=1,
+        max_epochs=2,
+        patience=2,
+    )
+    metadata = {
+        "dataset_hash": "dataset",
+        "split_hash": "split",
+        "train_message_graph_hash": "train",
+        "node_index_map_hash": "nodes",
+        "feature_transformer_hash": "features",
+    }
+    result = train_one_seed(
+        bundle.train_data,
+        bundle.val_data,
+        bundle.test_data,
+        reference,
+        seed=13,
+        config=config,
+        output_dir=tmp_path,
+        artifact_metadata=metadata,
+    )
+    loaded = load_training_checkpoint(
+        tmp_path / "best_checkpoint.pt",
+        bundle.train_data.metadata(),
+        config,
+        expected_artifact_metadata=metadata,
+    )
+
+    assert evaluate_split(loaded, bundle.test_data, reference) == pytest.approx(
+        result.metrics
+    )
+    with pytest.raises(ValueError, match="metadata is incompatible"):
+        load_training_checkpoint(
+            tmp_path / "best_checkpoint.pt",
+            bundle.train_data.metadata(),
+            config,
+            expected_artifact_metadata={**metadata, "split_hash": "changed"},
+        )

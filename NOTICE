@@ -1,0 +1,9 @@
+biomedical-kg-target-prioritization
+Copyright 2026 lysyloxidase
+
+The software is licensed under Apache-2.0.
+
+Redistributed sample data retain upstream terms and attribution requirements.
+See data/sample/manifest.json, docs/dataset-card.md, and docs/data-sources.md.
+The sample includes ChEMBL-derived data under CC BY-SA 3.0; downstream
+redistribution must preserve applicable attribution and share-alike terms.

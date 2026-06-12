@@ -3,16 +3,23 @@ from __future__ import annotations
 import importlib
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
+import torch
 
-from kgtp.baselines.centrality import CentralityBaseline
+from kgtp.baselines.adjacency_svd import AdjacencySVDBaseline
 from kgtp.baselines.common import evaluate_model
-from kgtp.baselines.kge import KGE_MODELS, KGEBaseline, train_pykeen_pipeline
+from kgtp.baselines.kge import KGE_MODELS, KGEBaseline, score_kge_vectors
 from kgtp.baselines.logistic_regression import LogisticRegressionBaseline
 from kgtp.baselines.matrix_factorization import MatrixFactorizationBaseline
 from kgtp.baselines.node2vec import Node2VecBaseline
-from kgtp.baselines.popularity import PopularityBaseline
-from kgtp.baselines.text_embeddings import TextEmbeddingBaseline
+from kgtp.baselines.simple import RandomScoreBaseline
+from kgtp.baselines.text_embeddings import (
+    HashTextBaseline,
+    PubMedBERTBaseline,
+    SentenceTransformerBaseline,
+    load_embedding_cache,
+)
 from kgtp.eval.metrics import sample_negative_triples
 
 
@@ -23,6 +30,7 @@ def _baseline_fixture():
         ("D2", "associated_with", "G2"),
         ("D2", "associated_with", "G3"),
     ]
+    validation = [("D1", "associated_with", "G4")]
     test = [
         ("D1", "associated_with", "G3"),
         ("D2", "associated_with", "G4"),
@@ -31,17 +39,15 @@ def _baseline_fixture():
         ("D1", "associated_with"): ["G1", "G2", "G3", "G4", "G5", "G6"],
         ("D2", "associated_with"): ["G1", "G2", "G3", "G4", "G5", "G6"],
     }
-    all_known = set(train) | set(test) | {("D1", "associated_with", "G4")}
+    all_known = set(train) | set(validation) | set(test)
     train_negatives = sample_negative_triples(
         train,
         all_known=all_known,
-        tail_candidates={
-            ("D1", "associated_with"): tails[("D1", "associated_with")],
-            ("D2", "associated_with"): tails[("D2", "associated_with")],
-        },
+        tail_candidates=tails,
         negatives_per_positive=2,
         seed=5,
     )
+    validation_negatives = [("D1", "associated_with", "G5")]
     graph_triples = [
         *train,
         ("G1", "interacts", "G2"),
@@ -65,41 +71,52 @@ def _baseline_fixture():
     }
     return (
         train,
+        validation,
         test,
         all_known,
         tails,
         train_negatives,
+        validation_negatives,
         graph_triples,
         descriptions,
         node_features,
     )
 
 
-def test_all_seven_baselines_produce_filtered_protocol_metrics(tmp_path) -> None:
+def test_supported_baselines_produce_shared_filtered_metrics() -> None:
     (
         train,
+        validation,
         test,
         all_known,
         tails,
         train_negatives,
+        validation_negatives,
         graph_triples,
         descriptions,
         node_features,
     ) = _baseline_fixture()
 
     baselines = [
-        PopularityBaseline().fit(graph_triples),
+        RandomScoreBaseline(seed=13),
         LogisticRegressionBaseline(epochs=20).fit(
             train, train_negatives, node_features=node_features
         ),
         MatrixFactorizationBaseline(epochs=20, seed=3).fit(train, train_negatives),
-        TextEmbeddingBaseline(cache_path=tmp_path / "text_cache.json").fit(
-            descriptions
-        ),
-        Node2VecBaseline(dimension=4).fit(graph_triples),
-        CentralityBaseline().fit(graph_triples),
-        KGEBaseline(model_name="DistMult", epochs=20, seed=3).fit(
-            train, train_negatives
+        HashTextBaseline().fit(descriptions),
+        AdjacencySVDBaseline(dimension=4).fit(graph_triples),
+        Node2VecBaseline(
+            dimension=4,
+            walk_length=5,
+            walks_per_node=2,
+            epochs=1,
+            seed=3,
+        ).fit(graph_triples),
+        KGEBaseline(model_name="DistMult", epochs=10, seed=3).fit(
+            graph_triples,
+            train_negatives,
+            validation_positives=validation,
+            validation_negatives=validation_negatives,
         ),
     ]
 
@@ -114,49 +131,196 @@ def test_all_seven_baselines_produce_filtered_protocol_metrics(tmp_path) -> None
         )
         assert result["primary_metric"] == "AUPRC"
         assert {"AUROC", "AUPRC", "filtered", "raw"}.issubset(result)
-        assert {"Hits@1", "Hits@3", "Hits@10", "MRR"}.issubset(result["filtered"])  # type: ignore[arg-type]
-
-    assert (tmp_path / "text_cache.json").exists()
 
 
-def test_kge_declares_ogbl_biokg_competitor_models() -> None:
+def test_adjacency_svd_and_node2vec_are_distinct_algorithms() -> None:
+    graph = [
+        ("A", "edge", "B"),
+        ("B", "edge", "C"),
+        ("C", "edge", "D"),
+        ("D", "edge", "A"),
+    ]
+    svd = AdjacencySVDBaseline(dimension=3).fit(graph)
+    node2vec = Node2VecBaseline(
+        dimension=3,
+        walk_length=6,
+        walks_per_node=3,
+        p=0.5,
+        q=2.0,
+        epochs=2,
+        seed=7,
+    ).fit(graph)
+
+    assert node2vec.walks
+    assert all(len(walk) <= 6 for walk in node2vec.walks)
+    assert node2vec.hyperparameters()["p"] == 0.5
+    assert node2vec.hyperparameters()["q"] == 2.0
+    assert not torch.allclose(
+        torch.tensor(svd.embeddings["A"]),
+        torch.tensor(node2vec.embeddings["A"]),
+    )
+
+
+def test_kge_scoring_functions_match_hand_computed_values() -> None:
+    head_real = torch.tensor([[1.0, 2.0]])
+    relation_real = torch.tensor([[0.5, -1.0]])
+    tail_real = torch.tensor([[1.5, 1.0]])
+    head_imag = torch.tensor([[0.2, -0.3]])
+    relation_imag = torch.tensor([[0.4, 0.1]])
+    tail_imag = torch.tensor([[-0.2, 0.5]])
+
+    transe = score_kge_vectors("TransE", head_real, relation_real, tail_real)
+    distmult = score_kge_vectors("DistMult", head_real, relation_real, tail_real)
+    complex_score = score_kge_vectors(
+        "ComplEx",
+        head_real,
+        relation_real,
+        tail_real,
+        head_imag=head_imag,
+        relation_imag=relation_imag,
+        tail_imag=tail_imag,
+    )
+    rotate = score_kge_vectors(
+        "RotatE",
+        head_real,
+        torch.zeros_like(relation_real),
+        tail_real,
+        head_imag=head_imag,
+        tail_imag=tail_imag,
+    )
+
+    assert transe.item() == pytest.approx(0.0)
+    assert distmult.item() == pytest.approx(-1.25)
+    expected_complex = (
+        head_real * relation_real * tail_real
+        + head_imag * relation_real * tail_imag
+        + head_real * relation_imag * tail_imag
+        - head_imag * relation_imag * tail_real
+    ).sum()
+    assert complex_score.item() == pytest.approx(expected_complex.item())
+    expected_rotate = -torch.sqrt(
+        (head_real - tail_real).square() + (head_imag - tail_imag).square() + 1e-12
+    ).sum()
+    assert rotate.item() == pytest.approx(expected_rotate.item())
+    assert (
+        len({transe.item(), distmult.item(), complex_score.item(), rotate.item()}) == 4
+    )
+
+
+def test_kge_declares_all_four_named_models() -> None:
     assert set(KGE_MODELS) == {"TransE", "DistMult", "ComplEx", "RotatE"}
 
 
-def test_pykeen_pipeline_adapter_is_called_when_available(monkeypatch) -> None:
-    captured = {}
-
-    def fake_pipeline(**kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(metric_results={"mrr": 0.5})
+def test_sentence_transformer_missing_dependency_fails_without_hash_fallback(
+    monkeypatch,
+) -> None:
+    real_import = importlib.import_module
 
     def fake_import(name: str):
-        if name == "pykeen.pipeline":
-            return SimpleNamespace(pipeline=fake_pipeline)
-        return importlib.import_module(name)
-
-    monkeypatch.setattr("kgtp.baselines.kge.importlib.import_module", fake_import)
-
-    result = train_pykeen_pipeline(
-        [("D1", "associated_with", "G1")],
-        model_name="TransE",
-        seed=13,
-    )
-
-    assert result.metric_results["mrr"] == 0.5
-    assert captured["model"] == "TransE"
-    assert captured["random_seed"] == 13
-
-
-def test_pykeen_adapter_reports_missing_dependency(monkeypatch) -> None:
-    def fake_import(name: str):
-        if name == "pykeen.pipeline":
+        if name == "sentence_transformers":
             raise ModuleNotFoundError(name)
-        return importlib.import_module(name)
+        return real_import(name)
 
-    monkeypatch.setattr("kgtp.baselines.kge.importlib.import_module", fake_import)
+    monkeypatch.setattr(
+        "kgtp.baselines.text_embeddings.importlib.import_module", fake_import
+    )
+    with pytest.raises(RuntimeError, match="requires the optional"):
+        SentenceTransformerBaseline(model_name="example/model").fit({"D1": "text"})
 
-    with pytest.raises(RuntimeError, match="PyKEEN is not installed"):
-        train_pykeen_pipeline(
-            [("D1", "associated_with", "G1")], model_name="TransE", seed=13
-        )
+
+def test_pubmedbert_missing_dependency_fails_without_hash_fallback(
+    monkeypatch,
+) -> None:
+    real_import = importlib.import_module
+
+    def fake_import(name: str):
+        if name == "transformers":
+            raise ModuleNotFoundError(name)
+        return real_import(name)
+
+    monkeypatch.setattr(
+        "kgtp.baselines.text_embeddings.importlib.import_module", fake_import
+    )
+    with pytest.raises(RuntimeError, match="requires the optional"):
+        PubMedBERTBaseline().fit({"D1": "text"})
+
+
+def test_sentence_transformer_uses_real_encoder_output_and_cache(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    class FakeModel:
+        def __init__(self, model_name: str) -> None:
+            assert model_name == "test/model"
+
+        def encode(self, texts: list[str]) -> np.ndarray:
+            assert texts == ["disease text", "gene text"]
+            return np.asarray([[1.0, 0.0], [0.0, 1.0]])
+
+    fake_module = SimpleNamespace(SentenceTransformer=FakeModel)
+    monkeypatch.setattr(
+        "kgtp.baselines.text_embeddings.importlib.import_module",
+        lambda name: (
+            fake_module
+            if name == "sentence_transformers"
+            else importlib.import_module(name)
+        ),
+    )
+    cache_path = tmp_path / "embeddings.json"
+    model = SentenceTransformerBaseline(
+        model_name="test/model",
+        cache_path=cache_path,
+    ).fit({"G1": "gene text", "D1": "disease text"})
+
+    assert model.score(("D1", "associated_with", "G1")) == pytest.approx(0.0)
+    assert model.score(("D1", "associated_with", "missing")) == 0.0
+    assert load_embedding_cache(cache_path)["D1"].tolist() == [1.0, 0.0]
+
+
+def test_pubmedbert_uses_contextual_model_output(monkeypatch) -> None:
+    class FakeTokenizer:
+        @classmethod
+        def from_pretrained(cls, model_name: str):
+            assert "BiomedBERT" in model_name
+            return cls()
+
+        def __call__(self, text: str, **kwargs):
+            assert text == "biomedical text"
+            assert kwargs["return_tensors"] == "pt"
+            return {"attention_mask": torch.tensor([[1, 1]])}
+
+    class FakeModel:
+        @classmethod
+        def from_pretrained(cls, model_name: str):
+            assert "BiomedBERT" in model_name
+            return cls()
+
+        def eval(self) -> None:
+            return None
+
+        def __call__(self, **encoded):
+            assert "attention_mask" in encoded
+            return SimpleNamespace(
+                last_hidden_state=torch.tensor([[[1.0, 2.0], [3.0, 4.0]]])
+            )
+
+    fake_transformers = SimpleNamespace(
+        AutoTokenizer=FakeTokenizer,
+        AutoModel=FakeModel,
+    )
+    real_import = importlib.import_module
+
+    def fake_import(name: str):
+        if name == "transformers":
+            return fake_transformers
+        return real_import(name)
+
+    monkeypatch.setattr(
+        "kgtp.baselines.text_embeddings.importlib.import_module",
+        fake_import,
+    )
+    model = PubMedBERTBaseline().fit({"D1": "biomedical text"})
+
+    assert model.embeddings["D1"].tolist() == [2.0, 3.0]
+    assert model.score(("D1", "associated_with", "D1")) == pytest.approx(1.0)
+    assert model.score(("D1", "associated_with", "missing")) == 0.0

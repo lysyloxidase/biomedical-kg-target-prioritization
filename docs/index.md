@@ -1,10 +1,10 @@
 # Biomedical KG Target Prioritization
 
-This documentation tracks an OA-centric heterogeneous knowledge graph benchmark
-for target prioritization. The project covers source selection, Ensembl-hub
-normalization, Neo4j/PyG export, leakage-free link-prediction splits, filtered
-OGB-style metrics, non-graph baselines, HGT/GraphSAGE/R-GCN models, empirical
-ablations, and interpretable target rationales.
+This documentation tracks pre-1.0 research software for OA-centric
+knowledge-graph target prioritization. The checked-in sample pipeline covers
+source provenance, normalization, split-first PyG artifacts, baseline and GNN
+execution, evaluation, model attributions, and fail-closed serving. A
+production-scale biomedical benchmark has not yet been completed.
 
 The benchmark is a research tool for computational hypothesis generation. It is
 not clinical or therapeutic advice.

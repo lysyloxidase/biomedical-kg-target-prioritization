@@ -1,0 +1,144 @@
+{
+  "dataset": "kgtp-small-oa-sample",
+  "disease_anchor": {
+    "id": "EFO_0004616",
+    "name": "osteoarthritis, knee"
+  },
+  "files": {
+    "disease_gene.parquet": {
+      "bytes": 2808,
+      "columns": [
+        "disease_id",
+        "gene_id",
+        "score"
+      ],
+      "rows": 30,
+      "sha256": "7a002f83d9fc6e3ad3be4442fabdcd97b3a6743c8cd8029f4975e6811f0a8c4f"
+    },
+    "drug_gene.parquet": {
+      "bytes": 3792,
+      "columns": [
+        "drug_id",
+        "gene_id",
+        "target_chembl_id",
+        "action_type",
+        "mechanism_of_action"
+      ],
+      "rows": 7,
+      "sha256": "e40dd686942f5f0e4fd9868068ff5a23f3c5785609472f0a519ce05a996c8ed3"
+    },
+    "gene_gene.parquet": {
+      "bytes": 6279,
+      "columns": [
+        "gene_a",
+        "gene_b",
+        "score",
+        "string_protein_a",
+        "string_protein_b"
+      ],
+      "rows": 195,
+      "sha256": "b505efa5ab281c91254a5344795604d989b4760c544864bdcf676c4d60183ee7"
+    },
+    "gene_go.parquet": {
+      "bytes": 6544,
+      "columns": [
+        "gene_id",
+        "go_id",
+        "evidence_code",
+        "qualifier",
+        "assigned_by",
+        "reference"
+      ],
+      "rows": 120,
+      "sha256": "70e9b93a48da2ba5615025f73f97135e85f9d3974627c1be181c35a3bd454617"
+    },
+    "gene_pathway.parquet": {
+      "bytes": 4998,
+      "columns": [
+        "gene_id",
+        "pathway_id",
+        "pathway_name"
+      ],
+      "rows": 89,
+      "sha256": "f326190ccbaa608249799ad69ebc8ddb83d9243c697c5025b64d3b3cecedb61b"
+    },
+    "nodes.parquet": {
+      "bytes": 17230,
+      "columns": [
+        "node_id",
+        "node_type",
+        "label",
+        "symbol",
+        "description",
+        "smiles",
+        "namespace",
+        "uniprot_id"
+      ],
+      "rows": 232,
+      "sha256": "558299c33f85bd2077af24149fa7ee1298f51771d3b3d066f3e5b3a7d82cfbe5"
+    },
+    "pathway_pathway.parquet": {
+      "bytes": 2685,
+      "columns": [
+        "parent_pathway_id",
+        "child_pathway_id"
+      ],
+      "rows": 48,
+      "sha256": "2bcfd6f1475f5b08dc314b947ba12036b5346f51664dc81989bcce52f1ad25be"
+    }
+  },
+  "retrieval_date": "2026-06-12",
+  "schema_version": 1,
+  "selection": {
+    "open_targets_total_associated_targets": 1644,
+    "positive_edges": "Top 24 Open Targets associations plus six prespecified OA sanity-check genes when present.",
+    "string_expansion": "STRING high-confidence network with up to 30 added neighbors; only nodes mapped to Ensembl genes were retained."
+  },
+  "sources": {
+    "chembl": {
+      "license": "CC-BY-SA-3.0",
+      "release": "ChEMBL_37",
+      "release_date": "2026-05-01",
+      "url": "https://www.ebi.ac.uk/chembl/api/data/mechanism.json"
+    },
+    "ensembl": {
+      "license": "CC-BY-4.0",
+      "release": "live REST snapshot",
+      "url": "https://rest.ensembl.org/xrefs/symbol/homo_sapiens/{symbol}"
+    },
+    "goa_quickgo": {
+      "license": "CC-BY-4.0",
+      "release": "live QuickGO snapshot",
+      "url": "https://www.ebi.ac.uk/QuickGO/services/annotation/search"
+    },
+    "open_targets": {
+      "license": "CC0-1.0",
+      "release": "live API snapshot; release not exposed by response",
+      "url": "https://api.platform.opentargets.org/api/v4/graphql"
+    },
+    "reactome": {
+      "license": "CC0-1.0 for database data",
+      "release": "96",
+      "url": "https://reactome.org/ContentService/data/mapping/ENSEMBL/{gene_id}/pathways"
+    },
+    "string": {
+      "license": "CC-BY-4.0",
+      "release": "12.0",
+      "url": "https://string-db.org/api/json/network"
+    },
+    "uniprot": {
+      "license": "CC-BY-4.0",
+      "release": "2026_02",
+      "url": "https://rest.uniprot.org/uniprotkb/search"
+    }
+  },
+  "transformations": [
+    "Normalized human gene identifiers to versionless Ensembl gene IDs.",
+    "Canonicalized STRING gene pairs lexicographically.",
+    "Scaled STRING combined scores from 0-1 to integer 0-1000.",
+    "Selected at most two Reactome pathways per gene, preferring OA-relevant labels.",
+    "Selected at most two non-NOT GOA annotations per mapped UniProt accession.",
+    "Selected at most two ChEMBL mechanisms per single-protein target.",
+    "Sorted every output table deterministically and removed duplicate keys."
+  ]
+}

@@ -30,6 +30,7 @@ class MultiTaskLinkPredictor(nn.Module):
         super().__init__()
         self.encoder = encoder
         self.edge_types = edge_types
+        self.is_trained = False
         self.decoders = nn.ModuleDict(
             {
                 _edge_key(edge_type): make_decoder(

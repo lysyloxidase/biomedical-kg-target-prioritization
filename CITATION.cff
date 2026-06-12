@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use this research software, cite the repository and the exact run manifest."
+title: "biomedical-kg-target-prioritization"
+version: 0.2.0
+date-released: 2026-06-12
+license: Apache-2.0
+repository-code: "https://github.com/lysyloxidase/biomedical-kg-target-prioritization"
+authors:
+  - family-names: "lysyloxidase"

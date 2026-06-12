@@ -7,7 +7,7 @@ import importlib
 import json
 import math
 from collections import defaultdict, deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -61,6 +61,7 @@ def build_heterodata(
     output_dir: PathLike | None = None,
     gene_feature_mode: str = "structural",
     add_reverse_edges: bool = True,
+    precomputed_features: Mapping[str, torch.Tensor] | None = None,
 ) -> HeteroData:
     """Build a PyG ``HeteroData`` object from deterministic node/edge tables."""
 
@@ -76,24 +77,41 @@ def build_heterodata(
         data[node_type].num_nodes = len(ids)
         data[node_type].node_id = ids
 
-    data["gene"].x = _gene_features(
-        list(node_maps["gene"]),
-        normalized_nodes,
-        edge_tables,
-        mode=gene_feature_mode,
-    )
-    data["disease"].x = _disease_features(list(node_maps["disease"]), normalized_nodes)
-    data["drug"].x = _drug_features(list(node_maps["drug"]), normalized_nodes)
-    data["pathway"].x = _pathway_features(
-        list(node_maps["pathway"]),
-        normalized_nodes,
-        edge_tables,
-    )
-    data["go_term"].x = _go_term_features(
-        list(node_maps["go_term"]),
-        normalized_nodes,
-        edge_tables,
-    )
+    generated_features: dict[str, Callable[[], torch.Tensor]] = {
+        "gene": lambda: _gene_features(
+            list(node_maps["gene"]),
+            normalized_nodes,
+            edge_tables,
+            mode=gene_feature_mode,
+        ),
+        "disease": lambda: _disease_features(
+            list(node_maps["disease"]), normalized_nodes
+        ),
+        "drug": lambda: _drug_features(list(node_maps["drug"]), normalized_nodes),
+        "pathway": lambda: _pathway_features(
+            list(node_maps["pathway"]),
+            normalized_nodes,
+            edge_tables,
+        ),
+        "go_term": lambda: _go_term_features(
+            list(node_maps["go_term"]),
+            normalized_nodes,
+            edge_tables,
+        ),
+    }
+    for node_type, build_features in generated_features.items():
+        features = (
+            precomputed_features[node_type]
+            if precomputed_features is not None and node_type in precomputed_features
+            else build_features()
+        )
+        if features.size(0) != len(node_maps[node_type]):
+            msg = (
+                f"Feature row count for {node_type} is {features.size(0)}, "
+                f"expected {len(node_maps[node_type])}"
+            )
+            raise ValueError(msg)
+        data[node_type].x = features
 
     for edges in edge_tables.values():
         edge_type = _edge_type_from_table(edges)

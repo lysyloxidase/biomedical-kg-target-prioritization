@@ -1,11 +1,4 @@
-"""Interpretable target rationales for heterogeneous link prediction.
-
-PyG's hetero GNNExplainer support is still incomplete for this use case, so the
-public wrapper prefers ``CaptumExplainer(IntegratedGradients)`` and keeps a
-deterministic integrated-gradients fallback that still returns a
-``HeteroExplanation``. The fallback is intentionally useful for CI fixtures and
-for early project stages before a fully trained HGT checkpoint exists.
-"""
+"""Model attributions for heterogeneous link prediction."""
 
 from __future__ import annotations
 
@@ -62,6 +55,7 @@ class TargetExplainer:
         """Return feature/node/edge attributions for one disease-gene link."""
 
         graph = self._require_data(data)
+        self._require_trained_model()
         edge_label_index = torch.tensor([[disease_idx], [gene_idx]], dtype=torch.long)
 
         if self.use_pyg_captum and self.captum_available:
@@ -76,15 +70,55 @@ class TargetExplainer:
                 )
 
         attributions, score = self._integrated_gradients(graph, edge_label_index)
+        edge_masks = self._edge_occlusion_masks(
+            graph,
+            edge_label_index,
+            baseline_score=score,
+        )
         explanation = self._build_hetero_explanation(
             graph,
             attributions,
+            edge_masks,
             disease_idx=disease_idx,
             gene_idx=gene_idx,
             score=score,
-            method="IntegratedGradients fallback",
+            method="IntegratedGradients features + edge occlusion",
         )
         return explanation
+
+    def score_link(
+        self,
+        disease_idx: int,
+        gene_idx: int,
+        data: HeteroData | None = None,
+    ) -> float:
+        """Return the trained model's raw score for one candidate link."""
+        graph = self._require_data(data)
+        self._require_trained_model()
+        index = torch.tensor([[disease_idx], [gene_idx]], dtype=torch.long)
+        return self._safe_no_grad_score(graph, index)
+
+    def score_without_edges(
+        self,
+        disease_idx: int,
+        gene_idx: int,
+        removals: Mapping[EdgeType, list[int]],
+        data: HeteroData | None = None,
+    ) -> float:
+        """Score a link after removing selected message-edge positions."""
+        graph = self._require_data(data)
+        self._require_trained_model()
+        edge_index_dict = _edge_index_dict(graph)
+        for edge_type, positions in removals.items():
+            edge_index = edge_index_dict.get(edge_type)
+            if edge_index is None or not positions:
+                continue
+            keep = torch.ones(edge_index.size(1), dtype=torch.bool)
+            keep[torch.tensor(positions, dtype=torch.long)] = False
+            edge_index_dict[edge_type] = edge_index[:, keep]
+        index = torch.tensor([[disease_idx], [gene_idx]], dtype=torch.long)
+        with torch.no_grad():
+            return float(self._link_score(graph.x_dict, edge_index_dict, index).item())
 
     def explanatory_subgraph(
         self,
@@ -151,6 +185,8 @@ class TargetExplainer:
         )
         return {
             "method": getattr(explanation, "method", "unknown"),
+            "model_attribution": True,
+            "causal_explanation": False,
             "score": float(getattr(explanation, "score", math.nan)),
             "prediction": {
                 "edge_type": list(
@@ -216,8 +252,8 @@ class TargetExplainer:
         node_order = list(base_x)
         score_value = math.nan
 
+        self.model.eval()
         try:
-            self.model.eval()
             for step in range(1, self.integration_steps + 1):
                 alpha = step / self.integration_steps
                 scaled = {
@@ -247,13 +283,45 @@ class TargetExplainer:
                 * (accumulated[node_type] / self.integration_steps)
                 for node_type in node_order
             }
-        except Exception as exc:  # Fallback for uninitialized or unsupported models.
+        except Exception as exc:
             self.last_pyg_error = f"{type(exc).__name__}: {exc}"
-            attributions = {
-                node_type: features.abs() for node_type, features in base_x.items()
-            }
-            score_value = self._safe_no_grad_score(data, edge_label_index)
+            raise RuntimeError(
+                "Integrated Gradients failed; no heuristic explanation was emitted"
+            ) from exc
         return attributions, score_value
+
+    def _edge_occlusion_masks(
+        self,
+        data: HeteroData,
+        edge_label_index: torch.Tensor,
+        *,
+        baseline_score: float,
+    ) -> dict[EdgeType, torch.Tensor]:
+        masks: dict[EdgeType, torch.Tensor] = {}
+        disease_idx = int(edge_label_index[0, 0].item())
+        gene_idx = int(edge_label_index[1, 0].item())
+        edge_index_dict = _edge_index_dict(data)
+        for edge_type, edge_index in edge_index_dict.items():
+            mask = torch.zeros(edge_index.size(1), dtype=torch.float32)
+            for position in _local_edge_positions(
+                edge_type,
+                edge_index,
+                disease_idx,
+                gene_idx,
+            ):
+                perturbed = dict(edge_index_dict)
+                keep = torch.ones(edge_index.size(1), dtype=torch.bool)
+                keep[position] = False
+                perturbed[edge_type] = edge_index[:, keep]
+                with torch.no_grad():
+                    score = self._link_score(
+                        data.x_dict,
+                        perturbed,
+                        edge_label_index,
+                    )
+                mask[position] = abs(baseline_score - float(score.item()))
+            masks[edge_type] = _normalize(mask)
+        return masks
 
     def _link_score(
         self,
@@ -291,6 +359,7 @@ class TargetExplainer:
         self,
         data: HeteroData,
         attributions: Mapping[str, torch.Tensor],
+        edge_masks: Mapping[EdgeType, torch.Tensor],
         *,
         disease_idx: int,
         gene_idx: int,
@@ -303,6 +372,7 @@ class TargetExplainer:
             store = explanation[node_type]
             store.x = data[node_type].x.detach()
             store.node_id = _node_ids(data, node_type)
+            store.raw_feature_attribution = attributions[node_type].detach()
             store.node_mask = _normalize(attribution.sum(dim=1, keepdim=True))
             store.feature_mask = _normalize(attribution.mean(dim=0))
 
@@ -312,9 +382,7 @@ class TargetExplainer:
             edge_index = data[edge_type].edge_index.detach()
             store = explanation[edge_type]
             store.edge_index = edge_index
-            store.edge_mask = _edge_mask_proxy(
-                edge_type, edge_index, disease_idx, gene_idx
-            )
+            store.edge_mask = edge_masks[cast(EdgeType, edge_type)]
 
         return self._annotate_explanation(
             explanation,
@@ -338,7 +406,9 @@ class TargetExplainer:
         explanation.method = method
         explanation.algorithm = self.algorithm_name
         explanation.attribution_method = self.attribution_method
-        explanation.attention_algorithm = self.attention_algorithm_name
+        explanation.edge_attribution_method = "single-edge occlusion"
+        explanation.model_attribution = True
+        explanation.causal_explanation = False
         explanation.prediction_edge_type = self.edge_type
         explanation.disease_idx = disease_idx
         explanation.gene_idx = gene_idx
@@ -359,6 +429,10 @@ class TargetExplainer:
             msg = "TargetExplainer requires HeteroData at construction or call time"
             raise ValueError(msg)
         return graph
+
+    def _require_trained_model(self) -> None:
+        if getattr(self.model, "is_trained", False) is not True:
+            raise RuntimeError("Explanations require a validated trained model")
 
     def _captum_can_construct(self) -> bool:
         try:
@@ -421,36 +495,27 @@ def _node_ids_from_store(store: Any, size: int) -> list[str]:
     return [str(index) for index in range(size)]
 
 
-def _edge_mask_proxy(
+def _local_edge_positions(
     edge_type: EdgeType,
     edge_index: torch.Tensor,
     disease_idx: int,
     gene_idx: int,
-) -> torch.Tensor:
+) -> list[int]:
     if edge_index.numel() == 0:
-        return torch.empty(0, dtype=torch.float32)
-    src_type, relation, dst_type = edge_type
-    weights = torch.full((edge_index.size(1),), 0.05, dtype=torch.float32)
+        return []
+    src_type, _, dst_type = edge_type
     source = edge_index[0]
     target = edge_index[1]
-
+    selected = torch.zeros(edge_index.size(1), dtype=torch.bool)
     if src_type == "disease":
-        weights = weights + (source == disease_idx).to(torch.float32) * 0.60
+        selected |= source == disease_idx
     if dst_type == "disease":
-        weights = weights + (target == disease_idx).to(torch.float32) * 0.60
+        selected |= target == disease_idx
     if src_type == "gene":
-        weights = weights + (source == gene_idx).to(torch.float32) * 0.60
+        selected |= source == gene_idx
     if dst_type == "gene":
-        weights = weights + (target == gene_idx).to(torch.float32) * 0.60
-    if edge_type == DISEASE_GENE_EDGE:
-        weights = weights + ((source == disease_idx) & (target == gene_idx)).to(
-            torch.float32
-        )
-    if relation.startswith("rev_") and src_type == "gene" and dst_type == "disease":
-        weights = weights + ((source == gene_idx) & (target == disease_idx)).to(
-            torch.float32
-        )
-    return _normalize(weights)
+        selected |= target == gene_idx
+    return selected.nonzero(as_tuple=False).view(-1).tolist()
 
 
 def _normalize(values: torch.Tensor) -> torch.Tensor:
